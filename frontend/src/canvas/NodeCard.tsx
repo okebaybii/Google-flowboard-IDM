@@ -810,6 +810,7 @@ function VideoTile({
   slotError,
   alt,
   onClick,
+  aspectRatio,
 }: {
   mediaId: string | undefined;
   // Upstream image's mediaId — used as the static poster so the tile
@@ -827,12 +828,22 @@ function VideoTile({
   slotError?: string | null;
   alt: string;
   onClick?: () => void;
+  aspectRatio?: string;
 }) {
   const [attempt, setAttempt] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [hovered, setHovered] = useState(false);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  let styleRatio = "16 / 9";
+  if (aspectRatio) {
+    if (aspectRatio.includes("PORTRAIT") || aspectRatio === "9:16") {
+      styleRatio = "9 / 16";
+    } else if (aspectRatio.includes("LANDSCAPE") || aspectRatio === "16:9") {
+      styleRatio = "16 / 9";
+    }
+  }
 
   useEffect(() => {
     setLoaded(false);
@@ -932,6 +943,11 @@ function VideoTile({
       }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      style={{
+        aspectRatio: styleRatio,
+        width: "100%",
+        height: "100%"
+      }}
     >
       {!loaded && placeholder}
       {!givenUp && (
@@ -949,7 +965,10 @@ function VideoTile({
             width: "100%",
             height: "100%",
             objectFit: "cover",
-            display: showVideo && loaded ? "block" : "none"
+            position: "absolute",
+            inset: 0,
+            opacity: showVideo && loaded ? 1 : 0,
+            pointerEvents: showVideo && loaded ? undefined : "none"
           }}
           onLoadedMetadata={() => setLoaded(true)}
           onLoadedData={() => setLoaded(true)}
@@ -970,7 +989,10 @@ function VideoTile({
             width: "100%",
             height: "100%",
             objectFit: "cover",
-            display: showPoster && loaded ? "block" : "none"
+            position: "absolute",
+            inset: 0,
+            opacity: showPoster && loaded ? 1 : 0,
+            pointerEvents: showPoster && loaded ? undefined : "none"
           }}
           onLoad={() => setLoaded(true)}
           onError={() => {
@@ -1041,6 +1063,7 @@ function VideoBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
         isError={(isError && !mid) || slotBlocked}
         slotError={slotError}
         alt={data.title}
+        aspectRatio={data.aspectRatio}
         onClick={onClick}
       />,
     );
@@ -1679,6 +1702,7 @@ function VideoAssemblyBody({ rfId, data }: { rfId: string; data: FlowboardNodeDa
             isProcessing={false}
             isError={false}
             alt={data.title}
+            aspectRatio={data.aspectRatio}
             onClick={() => useGenerationStore.getState().openResultViewer(rfId, 0)}
           />
         ) : (

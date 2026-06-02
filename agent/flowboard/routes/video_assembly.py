@@ -184,15 +184,22 @@ def _run_moviepy_assembly(
     narrations: List[str],
     audio_path: Optional[str],
     output_path: str,
-    node_id: Optional[int] = None
+    node_id: Optional[int] = None,
+    aspect_ratio: str = "16:9"
 ) -> None:
     """Concatenate videos and overlay audio + dynamic TTS narration using MoviePy.
     
     This function executes in a separate thread to prevent blocking the async loop.
     """
     from moviepy import VideoFileClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip
+    from moviepy.video.fx import Resize, Crop
     from gtts import gTTS
     import os
+
+    if aspect_ratio == "9:16":
+        target_w, target_h = 720, 1280
+    else:
+        target_w, target_h = 1280, 720
 
     clips = []
     tts_audio_clips = []
@@ -201,7 +208,21 @@ def _run_moviepy_assembly(
         # Load raw clips
         raw_clips = []
         for path in video_paths:
-            raw_clips.append(VideoFileClip(path))
+            c = VideoFileClip(path)
+            if c.w != target_w or c.h != target_h:
+                scale = max(target_w / c.w, target_h / c.h)
+                new_w = int(round(c.w * scale))
+                new_h = int(round(c.h * scale))
+                if new_w % 2 != 0:
+                    new_w += 1
+                if new_h % 2 != 0:
+                    new_h += 1
+                c = c.with_effects([
+                    Resize(new_size=(new_w, new_h)),
+                    Crop(x_center=new_w/2, y_center=new_h/2, width=target_w, height=target_h)
+                ])
+                logger.info(f"Aspect Ratio Alignment: Resized and center-cropped clip {path} to target {target_w}x{target_h}")
+            raw_clips.append(c)
 
         # 1. Detect audio beats if bg music exists
         total_raw_duration = sum(c.duration for c in raw_clips)
@@ -410,7 +431,8 @@ async def _assemble_videos_impl(
             narrations,
             audio_path,
             str(output_path),
-            node_id
+            node_id,
+            resolved_aspect_ratio
         )
         
         with get_session() as session:
@@ -712,11 +734,21 @@ async def run_batch_generation(
                         continue
                     
                     # Skip if already done
+                    aspect_mismatch = False
+                    if batch_video_aspect_ratio:
+                        if node.type in ("image", "Storyboard"):
+                            target_aspect = "IMAGE_ASPECT_RATIO_PORTRAIT" if batch_video_aspect_ratio == "VIDEO_ASPECT_RATIO_PORTRAIT" else "IMAGE_ASPECT_RATIO_LANDSCAPE"
+                            if node.data.get("aspectRatio") != target_aspect:
+                                aspect_mismatch = True
+                        else:
+                            if node.data.get("aspectRatio") != batch_video_aspect_ratio:
+                                aspect_mismatch = True
+
                     media_id = node.data.get("mediaId")
-                    if node.status == "done" and media_id:
+                    if node.status == "done" and media_id and not aspect_mismatch:
                         logger.info(f"Node {nid} is already done. Skipping.")
                         continue
-                    if node.status == "error" and media_id and not retry_failed:
+                    if node.status == "error" and media_id and not retry_failed and not aspect_mismatch:
                         logger.info(f"Node {nid} is error but already has media. Skipping.")
                         failed_nodes.add(nid)
                         continue
