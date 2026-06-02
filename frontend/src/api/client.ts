@@ -1,11 +1,32 @@
+import { useAuthStore } from "../store/auth";
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const { token, sessionId } = useAuthStore.getState();
+  const authHeaders: Record<string, string> = {};
+  if (token) {
+    authHeaders["Authorization"] = `Bearer ${token}`;
+  }
+  if (sessionId) {
+    authHeaders["X-Session-ID"] = sessionId;
+  }
+
   const res = await fetch(path, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...authHeaders,
       ...(init?.headers ?? {}),
     },
   });
+
+  if (res.status === 401) {
+    const errData = await res.json().catch(() => ({}));
+    if (errData.detail === "session_conflict") {
+      useAuthStore.getState().triggerConflict();
+      throw new Error("Session conflict: logged in elsewhere");
+    }
+  }
+
   if (!res.ok) {
     throw new Error(`${res.status} ${res.statusText}`);
   }

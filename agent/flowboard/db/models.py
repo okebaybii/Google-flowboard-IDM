@@ -268,3 +268,13 @@ class SocialBlockPost(SQLModel, table=True):
     scheduled_time: datetime
     posted_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=_utcnow)
+
+
+class UserSession(SQLModel, table=True):
+    """Tracks active user sessions for Firebase Auth and concurrency control.
+    
+    Ensures 1 account can only have 1 active device/browser session.
+    """
+    firebase_uid: str = Field(primary_key=True)
+    active_session_id: str
+    last_active_at: datetime = Field(default_factory=_utcnow)

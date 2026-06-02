@@ -7,13 +7,14 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Header, Request as FastAPIRequest
+from fastapi import FastAPI, HTTPException, Header, Depends, Request as FastAPIRequest
 from fastapi.middleware.cors import CORSMiddleware
 
 from flowboard.config import WS_HOST
 from flowboard.db import get_session, init_db
 from flowboard.db.models import Request
-from flowboard.routes import activity, auth, boards, chat, edges, flow_projects, llm, media, nodes, oauth, plans, projects, prompt, social, social_block, upload, vision, video_assembly
+from flowboard.routes import activity, auth, boards, chat, edges, flow_projects, llm, media, nodes, oauth, plans, projects, prompt, social, social_block, upload, vision, video_assembly, firebase_auth
+from flowboard.routes.firebase_auth import check_active_session_globally
 from flowboard.routes import references as references_route
 from flowboard.routes import requests as requests_route
 from flowboard.services.flow_client import flow_client
@@ -107,6 +108,23 @@ def _auto_import_facebook_accounts() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    
+    # Initialize Firebase Admin SDK
+    import os
+    import firebase_admin
+    from firebase_admin import credentials
+    
+    cred_path = os.getenv("FIREBASE_SERVICE_ACCOUNT") or "firebase-service-account.json"
+    if os.path.exists(cred_path):
+        try:
+            cred = credentials.Certificate(cred_path)
+            firebase_admin.initialize_app(cred)
+            logger.info("✅ Firebase Admin SDK initialized successfully.")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize Firebase Admin: {e}")
+    else:
+        logger.warning(f"⚠️ Firebase service account key not found at {cred_path}. Using mock authentication for development fallback.")
+
     _auto_import_facebook_accounts()  # Auto-import Facebook account
     recovered = _recover_orphan_running_requests()
     if recovered:
@@ -130,7 +148,12 @@ async def lifespan(app: FastAPI):
         logger.info("flowboard agent stopped")
 
 
-app = FastAPI(title="Flowboard Agent", version="0.0.2", lifespan=lifespan)
+app = FastAPI(
+    title="Flowboard Agent", 
+    version="0.0.2", 
+    lifespan=lifespan,
+    dependencies=[Depends(check_active_session_globally)]
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -140,6 +163,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(firebase_auth.router)
 app.include_router(boards.router)
 app.include_router(nodes.router)
 app.include_router(edges.router)
