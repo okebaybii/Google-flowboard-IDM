@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { useBoardStore, type FlowboardNodeData, type FlowNode } from "../store/board";
 import { useGenerationStore } from "../store/generation";
-import { mediaUrl, patchEdge, patchNode, uploadImage, uploadImageFromUrl } from "../api/client";
+import { mediaUrl, patchEdge, patchNode, uploadImage, uploadImageFromUrl, api } from "../api/client";
 import { requestAutoBrief } from "../api/autoBrief";
 import { useReferencesStore } from "../store/references";
 import {
@@ -1843,18 +1843,10 @@ function StoryScriptBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
 
     try {
       const dbId = parseInt(rfId, 10);
-      const response = await fetch(`/api/nodes/story-script/${dbId}/generate`, {
+      await api(`/api/nodes/story-script/${dbId}/generate`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: localPrompt }),
       });
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        throw new Error(err.detail || `HTTP ${response.status}`);
-      }
-
-      await response.json();
       
       // Update state to done
       useBoardStore.getState().updateNodeData(rfId, { status: "done" });
