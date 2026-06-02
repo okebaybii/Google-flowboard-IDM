@@ -96,13 +96,11 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
           data: { batchGenerating: false, autoAssembleAfterBatch: false },
         });
       }
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
-      if (autoAssemblePending && !autoAssembleTriggeredRef.current && !assembling) {
-        autoAssembleTriggeredRef.current = true;
-        void handleAssemble();
+      if (!autoAssemblePending) {
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+        }
       }
       return;
     }
