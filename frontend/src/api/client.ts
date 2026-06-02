@@ -510,12 +510,18 @@ export async function uploadImage(
   form.append("file", file);
 
   // Don't set Content-Type — the browser sets it with the correct boundary.
-  const res = await fetch("/api/upload", { method: "POST", body: form });
+  const { token, sessionId } = useAuthStore.getState();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (sessionId) headers["X-Session-ID"] = sessionId;
+
+  const res = await fetch("/api/upload", { method: "POST", headers, body: form });
   if (!res.ok) {
     throw new Error(await extractErrorMessage(res));
   }
   return res.json() as Promise<UploadResponse>;
 }
+
 
 export interface VisionDescribeResponse {
   media_id: string;
@@ -540,9 +546,8 @@ export async function autoPromptBatch(
   count: number,
   opts?: { camera?: string; language?: PromptLanguage; audioMode?: PromptAudioMode },
 ): Promise<AutoPromptBatchResponse> {
-  const res = await fetch("/api/prompt/auto-batch", {
+  return api<AutoPromptBatchResponse>("/api/prompt/auto-batch", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       node_id: nodeId,
       count,
@@ -551,19 +556,14 @@ export async function autoPromptBatch(
       audio_mode: opts?.audioMode,
     }),
   });
-  if (!res.ok) {
-    throw new Error(await extractErrorMessage(res));
-  }
-  return res.json() as Promise<AutoPromptBatchResponse>;
 }
 
 export async function autoPrompt(
   nodeId: number,
   opts?: { camera?: string; language?: PromptLanguage; audioMode?: PromptAudioMode },
 ): Promise<AutoPromptResponse> {
-  const res = await fetch("/api/prompt/auto", {
+  return api<AutoPromptResponse>("/api/prompt/auto", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       node_id: nodeId,
       camera: opts?.camera,
@@ -571,22 +571,13 @@ export async function autoPrompt(
       audio_mode: opts?.audioMode,
     }),
   });
-  if (!res.ok) {
-    throw new Error(await extractErrorMessage(res));
-  }
-  return res.json() as Promise<AutoPromptResponse>;
 }
 
 export async function describeMedia(mediaId: string): Promise<VisionDescribeResponse> {
-  const res = await fetch("/api/vision/describe", {
+  return api<VisionDescribeResponse>("/api/vision/describe", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ media_id: mediaId }),
   });
-  if (!res.ok) {
-    throw new Error(await extractErrorMessage(res));
-  }
-  return res.json() as Promise<VisionDescribeResponse>;
 }
 
 export async function uploadImageFromUrl(
@@ -594,15 +585,10 @@ export async function uploadImageFromUrl(
   projectId: string,
   nodeId?: number,
 ): Promise<UploadResponse> {
-  const res = await fetch("/api/upload-url", {
+  return api<UploadResponse>("/api/upload-url", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url, project_id: projectId, node_id: nodeId }),
   });
-  if (!res.ok) {
-    throw new Error(await extractErrorMessage(res));
-  }
-  return res.json() as Promise<UploadResponse>;
 }
 
 
@@ -647,27 +633,20 @@ export async function getLlmProviders(): Promise<LLMProviderInfo[]> {
   // Backend returns snake-case keys mapped from Python — but the route
   // already emits camelCase for the public surface. Re-typed here so
   // the spread/destructure pattern in the UI components stays clean.
-  const res = await fetch("/api/llm/providers");
-  if (!res.ok) throw new Error(`getLlmProviders: ${res.status}`);
-  return res.json() as Promise<LLMProviderInfo[]>;
+  return api<LLMProviderInfo[]>("/api/llm/providers");
 }
 
 export async function getLlmConfig(): Promise<LLMConfig> {
-  const res = await fetch("/api/llm/config");
-  if (!res.ok) throw new Error(`getLlmConfig: ${res.status}`);
-  return res.json() as Promise<LLMConfig>;
+  return api<LLMConfig>("/api/llm/config");
 }
 
 export async function setLlmConfig(
   partial: Partial<LLMConfig>,
 ): Promise<{ ok: boolean }> {
-  const res = await fetch("/api/llm/config", {
+  return api<{ ok: boolean }>("/api/llm/config", {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(partial),
   });
-  if (!res.ok) throw new Error(await extractErrorMessage(res));
-  return res.json();
 }
 
 export async function setLlmApiKey(
@@ -676,13 +655,10 @@ export async function setLlmApiKey(
 ): Promise<{ ok: boolean }> {
   // null clears the key. Backend chmods secrets.json to 0o600 after
   // every write; the key is never echoed back via getLlmProviders.
-  const res = await fetch(`/api/llm/providers/${name}`, {
+  return api<{ ok: boolean }>(`/api/llm/providers/${name}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ apiKey }),
   });
-  if (!res.ok) throw new Error(await extractErrorMessage(res));
-  return res.json();
 }
 
 export interface LlmTestResult {
@@ -697,11 +673,11 @@ export async function testLlmProvider(
   // Cost-bounded by the backend: 1-token ping, 15s deadline. Returns
   // ok:false (NOT a non-200 HTTP status) on any failure mode so the
   // UI can render the error inline without try/catch boilerplate.
-  const res = await fetch(`/api/llm/providers/${name}/test`, { method: "POST" });
-  if (!res.ok) {
-    return { ok: false, error: `HTTP ${res.status}` };
+  try {
+    return await api<LlmTestResult>(`/api/llm/providers/${name}/test`, { method: "POST" });
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-  return res.json();
 }
 
 
@@ -744,15 +720,13 @@ export async function getActivityList(opts?: {
   if (opts?.beforeId) search.set("before_id", String(opts.beforeId));
   if (opts?.type && opts.type.length > 0) search.set("type", opts.type.join(","));
   const q = search.toString();
-  const res = await fetch(`/api/activity${q ? `?${q}` : ""}`);
-  if (!res.ok) throw new Error(`getActivityList: ${res.status}`);
-  return res.json();
+  return api<{ items: ActivityListItem[]; next_before_id: number | null }>(
+    `/api/activity${q ? `?${q}` : ""}`,
+  );
 }
 
 export async function getActivityDetail(id: number): Promise<ActivityDetail> {
-  const res = await fetch(`/api/activity/${id}`);
-  if (!res.ok) throw new Error(`getActivityDetail: ${res.status}`);
-  return res.json();
+  return api<ActivityDetail>(`/api/activity/${id}`);
 }
 
 // Cancel a queued or running request. The activity row id IS the
@@ -760,7 +734,15 @@ export async function getActivityDetail(id: number): Promise<ActivityDetail> {
 // /api/requests. Backend returns 409 when the row has already settled
 // (done/failed/timeout/canceled).
 export async function cancelActivity(id: number): Promise<void> {
-  const res = await fetch(`/api/requests/${id}/cancel`, { method: "POST" });
+  const { token, sessionId } = useAuthStore.getState();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (sessionId) headers["X-Session-ID"] = sessionId;
+
+  const res = await fetch(`/api/requests/${id}/cancel`, {
+    method: "POST",
+    headers
+  });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     throw new Error(`cancelActivity: ${res.status} ${detail}`);
@@ -904,9 +886,17 @@ export async function patchReference(
 }
 
 export async function deleteReference(id: number): Promise<void> {
+  const { token, sessionId } = useAuthStore.getState();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (sessionId) headers["X-Session-ID"] = sessionId;
+
   // Backend returns 204 No Content; api<T>() would choke on the empty
   // body, so we use fetch() directly and skip the JSON parse.
-  const res = await fetch(`/api/references/${id}`, { method: "DELETE" });
+  const res = await fetch(`/api/references/${id}`, {
+    method: "DELETE",
+    headers
+  });
   if (!res.ok) {
     throw new Error(`deleteReference: ${res.status} ${res.statusText}`);
   }
