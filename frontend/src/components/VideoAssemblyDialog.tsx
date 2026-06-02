@@ -571,17 +571,20 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
                 Tải xuống 📥
               </button>
             </div>
-            <video
-              src={mediaUrl(data.mediaId)}
-              controls
-              style={{
-                width: "100%",
-                maxHeight: 240,
-                borderRadius: 8,
-                background: "#000",
-                boxShadow: "0 4px 12px rgba(0,0,0,0.3)"
-              }}
-            />
+            <div style={{ display: "flex", justifyContent: "center", width: "100%" }}>
+              <video
+                src={mediaUrl(data.mediaId)}
+                controls
+                style={{
+                  width: data.aspectRatio === "9:16" ? "auto" : "100%",
+                  height: data.aspectRatio === "9:16" ? "240px" : "auto",
+                  maxHeight: 240,
+                  borderRadius: 8,
+                  background: "#000",
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.3)"
+                }}
+              />
+            </div>
           </div>
         )}
 
