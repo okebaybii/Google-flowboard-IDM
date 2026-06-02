@@ -5,8 +5,7 @@ import {
   signOut, 
   GoogleAuthProvider, 
   signInWithPopup,
-  onAuthStateChanged,
-  sendEmailVerification 
+  onAuthStateChanged 
 } from "firebase/auth";
 import { firebaseAuth, hasRealFirebase } from "../lib/firebase";
 
@@ -68,7 +67,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
       
       const errData = await response.json().catch(() => ({}));
       if (response.status === 403 && errData.detail === "account_not_approved") {
-        set({ error: "Tài khoản của bạn đang chờ Admin kích hoạt duyệt. Vui lòng liên hệ quản trị viên!" });
+        set({ error: "Tài khoản của bạn đang chờ Admin kích hoạt trên Firebase Console. Vui lòng liên hệ quản trị viên!" });
       } else if (errData.detail === "session_conflict") {
         set({ sessionConflict: true });
       } else {
@@ -95,16 +94,6 @@ export const useAuthStore = create<AuthState>((set, get) => {
       if (hasRealFirebase && firebaseAuth) {
         onAuthStateChanged(firebaseAuth, async (fbUser) => {
           if (fbUser) {
-            if (!fbUser.emailVerified) {
-              await signOut(firebaseAuth);
-              set({ 
-                user: null, 
-                token: null, 
-                loading: false, 
-                error: "Tài khoản của bạn chưa được kích hoạt. Vui lòng xác thực email trong hộp thư để tiếp tục." 
-              });
-              return;
-            }
             try {
               const token = await fbUser.getIdToken();
               const backendData = await registerSessionOnBackend(token);
@@ -170,17 +159,6 @@ export const useAuthStore = create<AuthState>((set, get) => {
       if (hasRealFirebase && firebaseAuth) {
         try {
           const cred = await signInWithEmailAndPassword(firebaseAuth, email, password);
-          if (!cred.user.emailVerified) {
-            await sendEmailVerification(cred.user);
-            await signOut(firebaseAuth);
-            set({
-              user: null,
-              token: null,
-              loading: false,
-              error: "Tài khoản chưa được kích hoạt! Một email xác nhận mới đã được gửi tới hòm thư của bạn. Vui lòng xác thực trước khi đăng nhập."
-            });
-            return;
-          }
           const token = await cred.user.getIdToken();
           const backendData = await registerSessionOnBackend(token);
           if (backendData && backendData.ok) {
@@ -240,16 +218,26 @@ export const useAuthStore = create<AuthState>((set, get) => {
       if (hasRealFirebase && firebaseAuth) {
         try {
           const cred = await createUserWithEmailAndPassword(firebaseAuth, email, password);
-          // Send verification email
-          await sendEmailVerification(cred.user);
-          // Sign out immediately so they cannot login without verifying
-          await signOut(firebaseAuth);
-          set({
-            user: null,
-            token: null,
-            loading: false,
-            error: "Đăng ký thành công! Vui lòng kiểm tra email của bạn để xác thực/kích hoạt tài khoản trước khi đăng nhập."
-          });
+          const token = await cred.user.getIdToken();
+          const backendData = await registerSessionOnBackend(token);
+          if (backendData && backendData.ok) {
+            set({
+              user: {
+                uid: cred.user.uid,
+                email: cred.user.email || "",
+                name: cred.user.displayName || undefined,
+                photoURL: cred.user.photoURL || undefined,
+                is_admin: backendData.is_admin,
+                is_approved: backendData.is_approved
+              },
+              token,
+              sessionConflict: false,
+              loading: false
+            });
+          } else {
+            await signOut(firebaseAuth);
+            set({ user: null, token: null, loading: false });
+          }
         } catch (err: any) {
           set({ error: err.message, loading: false });
         }
