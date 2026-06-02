@@ -244,18 +244,8 @@ def _run_moviepy_assembly(
             # Tăng mốc offset thời gian dựa trên thời lượng thực tế của clip đã căn chỉnh
             cumulative_time += clip.duration
         
-        # 3. Concatenate video clips with a beautiful 0.4s crossfade transition
-        use_crossfade = len(clips) > 1 and all(c.duration > 0.8 for c in clips)
-        if use_crossfade:
-            from moviepy.video.fx import CrossFadeIn
-            fade_clips = []
-            for idx, c in enumerate(clips):
-                if idx > 0:
-                    c = c.with_effects([CrossFadeIn(0.4)])
-                fade_clips.append(c)
-            final_clip = concatenate_videoclips(fade_clips, method="compose", padding=-0.4)
-        else:
-            final_clip = concatenate_videoclips(clips, method="compose")
+        # 3. Concatenate video clips directly (direct cuts) as requested
+        final_clip = concatenate_videoclips(clips, method="compose")
         video_duration = final_clip.duration
         
         # 4. Mix audio components (Background Music at 20% volume + TTS Voiceover)
