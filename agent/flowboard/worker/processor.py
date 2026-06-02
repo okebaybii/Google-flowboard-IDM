@@ -731,6 +731,12 @@ class WorkerController:
 
                 req.status = "running"
                 s.add(req)
+                if req.node_id is not None:
+                    from flowboard.db.models import Node
+                    node = s.get(Node, req.node_id)
+                    if node:
+                        node.status = "running"
+                        s.add(node)
                 s.commit()
                 node_id = req.node_id
                 req_type = req.type
@@ -779,6 +785,31 @@ class WorkerController:
                     req.status = "done"
                     req.error = None
                 s.add(req)
+                
+                # Also update Node status directly in DB so it doesn't get stuck on browser refresh / page restart
+                if node_id is not None:
+                    from flowboard.db.models import Node
+                    node = s.get(Node, node_id)
+                    if node:
+                        if err:
+                            node.status = "timeout" if err == "timeout_waiting_video" else "error"
+                            node_data = dict(node.data or {})
+                            node_data["error"] = err
+                            node.data = node_data
+                        else:
+                            node.status = "done"
+                            if req_type in ("gen_image", "gen_video", "gen_video_omni", "edit_image"):
+                                res = result if isinstance(result, dict) else {}
+                                media_ids = res.get("media_ids") or []
+                                media_id = next((m for m in media_ids if m), None)
+                                
+                                node_data = dict(node.data or {})
+                                node_data["mediaId"] = media_id
+                                node_data["mediaIds"] = media_ids
+                                node_data["renderedAt"] = datetime.now(timezone.utc).isoformat()
+                                node_data.pop("error", None)
+                                node.data = node_data
+                        s.add(node)
                 s.commit()
         except Exception as exc:  # noqa: BLE001
             logger.exception("worker exception on rid=%s", rid)
@@ -790,6 +821,17 @@ class WorkerController:
                         req.error = str(exc)[:500]
                         req.finished_at = datetime.now(timezone.utc)
                         s.add(req)
+                        
+                        # Also update the Node status to error if exception occurs
+                        if req.node_id is not None:
+                            from flowboard.db.models import Node
+                            node = s.get(Node, req.node_id)
+                            if node:
+                                node.status = "error"
+                                node_data = dict(node.data or {})
+                                node_data["error"] = str(exc)[:500]
+                                node.data = node_data
+                                s.add(node)
                         s.commit()
             except Exception:  # noqa: BLE001
                 logger.exception("worker: failed to record failure for rid=%s", rid)
@@ -824,6 +866,16 @@ def apply_face_swap_to_node_media(node_id: int, request_type: str, result: dict)
             if src and src.type == "character":
                 char_node = src
                 break
+                
+        if not char_node:
+            node = session.get(Node, node_id)
+            if node:
+                char_node = session.exec(
+                    select(Node).where(
+                        Node.board_id == node.board_id,
+                        Node.type == "character"
+                    )
+                ).first()
                 
         if not char_node:
             return

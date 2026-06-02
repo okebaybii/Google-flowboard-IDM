@@ -32,6 +32,15 @@ const STYLE_PROMPTS: Record<string, { prompt: string }> = {
   },
   xuanhuan: {
     prompt: ", Chinese Xuanhuan fantasy style, glowing cultivation magic aura, epic mythical floating mountains, hyperdetailed CGI, celestial color grading, majestic"
+  },
+  product_review: {
+    prompt: ", professional product review styling, commercial product photography, cinematic soft studio lighting, high fidelity details, sharp focus, clean modern product catalog aesthetics"
+  },
+  tiktok_dance: {
+    prompt: ", vertical TikTok style vlog footage, dynamic handheld camera, bright urban indoor lighting, colorful aesthetic bedroom background, smooth motion, high frame rate, social media video look"
+  },
+  cartoon_style: {
+    prompt: ", beautiful 2D cartoon animation style, clean outlines, colorful cel shading, whimsical and charming cartoon aesthetics, highly detailed vector art"
   }
 };
 

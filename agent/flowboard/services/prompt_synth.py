@@ -373,7 +373,7 @@ def _collect_upstream(node_id: int) -> tuple[list[dict], Optional[Node]]:
             # that never received a prompt.
             brief = user_prompt or ai_brief
             subject_chars: list[str] = []
-            if n.type == "image":
+            if n.type in ("image", "Storyboard"):
                 gp_edges = s.exec(
                     select(Edge).where(Edge.target_id == uid).order_by(Edge.id)
                 ).all()
@@ -424,7 +424,7 @@ def _distinct_subjects(records: list[dict]) -> list[str]:
         ids: list[str] = []
         if r["type"] == "character":
             ids = [r["shortId"]]
-        elif r["type"] == "image":
+        elif r["type"] in ("image", "Storyboard"):
             ids = list(r.get("subject_chars") or [])
         for sid in ids:
             if sid and sid not in seen_set:
@@ -481,7 +481,7 @@ def _format_user_message(records: list[dict], target: Node) -> str:
         # the current ref set are silently dropped (they're context-only,
         # not bindable).
         suffix = ""
-        if r["type"] == "image" and r.get("subject_chars"):
+        if r["type"] in ("image", "Storyboard") and r.get("subject_chars"):
             translated = [
                 label_for_short_id[c]
                 for c in r["subject_chars"]
@@ -498,7 +498,8 @@ def _format_user_message(records: list[dict], target: Node) -> str:
             # Render without a label since there's no positional slot
             # for the LLM to reference.
             line = f"- {text}"
-        by_type.setdefault(r["type"], []).append(line)
+        r_type = "image" if r["type"] == "Storyboard" else r["type"]
+        by_type.setdefault(r_type, []).append(line)
 
     parts: list[str] = []
     if by_type.get("character"):

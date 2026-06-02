@@ -380,7 +380,7 @@ async def run_pipeline(
             _stamp_node_status(nid, "error", error="upstream_failed")
             continue
 
-        if node.type not in ("image", "video"):
+        if node.type not in ("image", "video", "Storyboard"):
             # character/prompt/note nodes have no generation step.
             continue
 
@@ -396,16 +396,16 @@ async def run_pipeline(
             _stamp_node_status(nid, "error", error="no_project")
             continue
 
-        # Image: collect upstream character mediaIds.
-        # Video: pick the first upstream image's mediaId as start.
+        # Image/Storyboard: collect upstream character/image mediaIds.
+        # Video: pick the first upstream image/Storyboard's mediaId as start.
         upstream_node_ids = incoming.get(nid, ())
         upstream_nodes = [node_by_id[u] for u in upstream_node_ids if u in node_by_id]
 
-        if node.type == "image":
+        if node.type in ("image", "Storyboard"):
             ref_media_ids = [
                 (u.data or {}).get("mediaId")
                 for u in upstream_nodes
-                if u.type in ("character", "image", "visual_asset")
+                if u.type in ("character", "image", "visual_asset", "Storyboard")
                 and isinstance((u.data or {}).get("mediaId"), str)
             ]
             ref_media_ids = [m for m in ref_media_ids if m]
@@ -419,7 +419,7 @@ async def run_pipeline(
         else:  # video
             start_media_id = None
             for u in upstream_nodes:
-                if u.type == "image":
+                if u.type in ("image", "Storyboard"):
                     mid = (u.data or {}).get("mediaId")
                     if isinstance(mid, str) and mid:
                         start_media_id = mid

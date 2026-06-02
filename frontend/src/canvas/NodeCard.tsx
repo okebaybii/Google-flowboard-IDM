@@ -1650,6 +1650,9 @@ const STYLE_PRESETS = [
   { id: "real_life", label: "📷 Đời Sống" },
   { id: "ancient_china", label: "⛩️ Cổ Trang" },
   { id: "xuanhuan", label: "✨ Huyền Huyễn" },
+  { id: "product_review", label: "🛍️ Review SP" },
+  { id: "tiktok_dance", label: "💃 KOC TikTok" },
+  { id: "cartoon_style", label: "🧸 Họa Hình" },
 ];
 
 function StylePresetBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {

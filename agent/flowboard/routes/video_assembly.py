@@ -5,6 +5,7 @@ Concatenates multiple upstream video node clips and overlays an uploaded audio f
 import uuid
 import logging
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
@@ -338,6 +339,14 @@ async def assemble_videos(node_id: int, req: AssembleRequest):
 
 class GenerateAllRequest(BaseModel):
     paygate_tier: Optional[str] = None
+    image_model: Optional[str] = None
+    video_quality: Optional[str] = None
+    video_model: Optional[str] = None
+    omni_flash_duration: Optional[int] = None
+    auto_assemble: bool = False
+    batch_video_aspect_ratio: Optional[str] = None
+    batch_camera_mode: Optional[str] = None
+    retry_failed: bool = False
 
 
 STYLE_PROMPTS = {
@@ -350,6 +359,9 @@ STYLE_PROMPTS = {
     "real_life": ", photorealistic real life style, daily life cinematography, natural soft lighting, high-fidelity details, sharp focus, captured on professional 8k camera",
     "ancient_china": ", ancient Chinese historical film style, traditional Hanfu costume, beautiful cinematic dynamic lighting, wuxia aesthetic style, atmospheric, highly detailed",
     "xuanhuan": ", Chinese Xuanhuan fantasy style, glowing cultivation magic aura, epic mythical floating mountains, hyperdetailed CGI, celestial color grading, majestic",
+    "product_review": ", professional product review styling, commercial product photography, cinematic soft studio lighting, high fidelity details, sharp focus, clean modern product catalog aesthetics",
+    "tiktok_dance": ", vertical TikTok style vlog footage, dynamic handheld camera, bright urban indoor lighting, colorful aesthetic bedroom background, smooth motion, high frame rate, social media video look",
+    "cartoon_style": ", beautiful 2D cartoon animation style, clean outlines, colorful cel shading, whimsical and charming cartoon aesthetics, highly detailed vector art",
 }
 
 
@@ -376,8 +388,99 @@ async def _await_request(
     raise asyncio.TimeoutError()
 
 
-async def run_batch_generation(assembly_node_id: int, project_id: str, paygate_tier: str):
+def _edge_variant_idx(edge: Edge) -> Optional[int]:
+    """Return the per-edge variant pin if present.
+
+    Older DB rows may expose the pin as the SQLModel field
+    `source_variant_idx`. Some frontend payloads/comments call it
+    `sourceVariantIdx`, so accept both defensively.
+    """
+    raw = getattr(edge, "source_variant_idx", None)
+    if raw is None:
+        raw = getattr(edge, "sourceVariantIdx", None)
+    if isinstance(raw, int) and raw >= 0:
+        return raw
+    return None
+
+
+def _select_node_media_id(node: Node, edge: Optional[Edge] = None) -> Optional[str]:
+    """Choose the media id from a node using Flowboard's variant rules."""
+    data = node.data or {}
+    variants = data.get("mediaIds")
+    pinned = _edge_variant_idx(edge) if edge is not None else None
+    if isinstance(variants, list) and pinned is not None and pinned < len(variants):
+        chosen = variants[pinned]
+        if isinstance(chosen, str) and chosen:
+            return chosen
+    active = data.get("mediaId")
+    if isinstance(active, str) and active:
+        return active
+    if isinstance(variants, list) and variants:
+        first = variants[0]
+        if isinstance(first, str) and first:
+            return first
+    return None
+
+
+def _collect_reference_media_ids(
+    node_id: int,
+    node_map: dict[int, Node],
+    incoming_edges: dict[int, list[Edge]],
+    allowed_types: set[str],
+) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+    for edge in incoming_edges.get(node_id, []):
+        src = node_map.get(edge.source_id)
+        if not src or src.type not in allowed_types:
+            continue
+        media_id = _select_node_media_id(src, edge)
+        if media_id and media_id not in seen:
+            refs.append(media_id)
+            seen.add(media_id)
+    return refs
+
+
+def _batch_camera_suffix(camera_mode: Optional[str]) -> str:
+    if camera_mode == "static":
+        return " Camera: locked-off tripod shot, no pan, no zoom, no dolly; keep framing stable while subjects may move naturally."
+    if camera_mode == "cinematic":
+        return " Camera: cinematic controlled movement with smooth dolly, pan, or parallax; avoid chaotic handheld shake."
+    if camera_mode == "dynamic":
+        return " Camera: subtle smooth movement, gentle pan or slow dolly/zoom only; keep subject readable and stable."
+    return ""
+
+
+def _friendly_generation_error(error: Optional[str]) -> str:
+    raw = (error or "").lower()
+    if "internal error" in raw:
+        return "Flow/Google video bị lỗi nội bộ. Hãy thử tạo lại clip, hoặc đổi prompt/camera/aspect nhẹ hơn."
+    if "quota" in raw or "resource has been exhausted" in raw:
+        return "Hết quota/credit tạo video. Hãy kiểm tra tài khoản hoặc thử lại sau."
+    if "unsafe" in raw or "sexual" in raw or "public_error" in raw:
+        return "Request có thể bị bộ lọc nội dung chặn. Hãy chỉnh prompt an toàn hơn."
+    if "missing_upstream_image" in raw:
+        return "Video thiếu ảnh đầu vào. Hãy nối video node với image/storyboard đã tạo xong."
+    if "timeout" in raw:
+        return "Tạo video quá lâu và bị timeout. Hãy thử lại hoặc giảm độ phức tạp prompt."
+    return "Tạo clip thất bại. Hãy thử lại hoặc kiểm tra prompt/reference đầu vào."
+
+
+async def run_batch_generation(
+    assembly_node_id: int,
+    project_id: str,
+    paygate_tier: str,
+    image_model: Optional[str] = None,
+    video_quality: Optional[str] = None,
+    video_model: Optional[str] = None,
+    omni_flash_duration: Optional[int] = None,
+    batch_video_aspect_ratio: Optional[str] = None,
+    batch_camera_mode: Optional[str] = None,
+    retry_failed: bool = False,
+):
     logger.info(f"Starting batch generation for assembly node {assembly_node_id}")
+    batch_video_aspect_ratio = batch_video_aspect_ratio or "VIDEO_ASPECT_RATIO_PORTRAIT"
+    batch_camera_mode = batch_camera_mode or "dynamic"
     try:
         with get_session() as session:
             node = session.get(Node, assembly_node_id)
@@ -391,17 +494,19 @@ async def run_batch_generation(assembly_node_id: int, project_id: str, paygate_t
             
         node_map = {n.id: n for n in all_nodes}
         
-        # Adjacency: target -> list of sources
+        # Adjacency: target -> list of incoming edges. Keep the full Edge
+        # object so per-edge variant pins are available when selecting media.
         incoming = defaultdict(list)
         for e in all_edges:
-            incoming[e.target_id].append(e.source_id)
+            incoming[e.target_id].append(e)
             
         # BFS to find all upstream nodes recursively
         visited = set()
         queue = [assembly_node_id]
         while queue:
             curr = queue.pop(0)
-            for src_id in incoming[curr]:
+            for edge in incoming[curr]:
+                src_id = edge.source_id
                 if src_id not in visited:
                     visited.add(src_id)
                     queue.append(src_id)
@@ -456,9 +561,14 @@ async def run_batch_generation(assembly_node_id: int, project_id: str, paygate_t
                 if node.status == "done" and media_id:
                     logger.info(f"Node {nid} is already done. Skipping.")
                     continue
+                if node.status == "error" and media_id and not retry_failed:
+                    logger.info(f"Node {nid} is error but already has media. Skipping.")
+                    failed_nodes.add(nid)
+                    continue
                     
                 # Upstream failure check
-                parent_ids = incoming[nid]
+                parent_edges = incoming[nid]
+                parent_ids = [edge.source_id for edge in parent_edges]
                 upstream_failed = any(p in failed_nodes for p in parent_ids)
                 if upstream_failed:
                     failed_nodes.add(nid)
@@ -495,51 +605,92 @@ async def run_batch_generation(assembly_node_id: int, project_id: str, paygate_t
                     if suffix:
                         final_prompt = f"{prompt}{suffix}"
                 
-                # Build dispatch params
+                # Build dispatch params. Match the manual generation path as
+                # closely as possible so batch output keeps the same character,
+                # visual asset, style, and pinned variant context.
+                ref_source_types = {"character", "image", "visual_asset", "Storyboard"}
                 if node.type in ("image", "Storyboard"):
-                    upstream_refs = []
-                    for p_id in parent_ids:
-                        p_node = session.get(Node, p_id)
-                        if p_node and p_node.type in ("character", "image", "visual_asset", "Storyboard"):
-                            mid = p_node.data.get("mediaId")
-                            if mid:
-                                upstream_refs.append(mid)
-                    
+                    upstream_refs = _collect_reference_media_ids(
+                        nid,
+                        node_map,
+                        incoming,
+                        ref_source_types,
+                    )
+
                     params = {
                         "prompt": final_prompt,
                         "project_id": project_id,
                         "aspect_ratio": node.data.get("aspectRatio") or "IMAGE_ASPECT_RATIO_LANDSCAPE",
                         "paygate_tier": paygate_tier,
                         "variant_count": node.data.get("variantCount") or 1,
+                        "image_model": node.data.get("imageModel") or image_model or "NANO_BANANA_2",
                     }
                     if upstream_refs:
                         params["ref_media_ids"] = upstream_refs
+                    prompts = node.data.get("prompts")
+                    if isinstance(prompts, list) and prompts:
+                        params["prompts"] = prompts
                     req_type = "gen_image"
                 else:  # video
-                    start_media_id = None
-                    for p_id in parent_ids:
-                        p_node = session.get(Node, p_id)
-                        if p_node and p_node.type in ("image", "Storyboard"):
-                            mid = p_node.data.get("mediaId")
-                            if mid:
-                                start_media_id = mid
-                                break
-                    if not start_media_id:
-                        failed_nodes.add(nid)
-                        node.status = "error"
-                        node.data = {**dict(node.data), "error": "missing_upstream_image"}
-                        session.add(node)
-                        session.commit()
-                        continue
-                        
-                    params = {
-                        "prompt": final_prompt,
-                        "project_id": project_id,
-                        "aspect_ratio": node.data.get("aspectRatio") or "VIDEO_ASPECT_RATIO_LANDSCAPE",
-                        "paygate_tier": paygate_tier,
-                        "start_media_id": start_media_id,
-                    }
-                    req_type = "gen_video"
+                    video_model_value = node.data.get("videoModel") or node.data.get("model") or video_model or "veo"
+                    is_omni = video_model_value == "omni_flash"
+                    if is_omni:
+                        ref_media_ids = _collect_reference_media_ids(
+                            nid,
+                            node_map,
+                            incoming,
+                            ref_source_types,
+                        )
+                        if not ref_media_ids:
+                            failed_nodes.add(nid)
+                            node.status = "error"
+                            node.data = {**dict(node.data), "error": "missing_ref_media_ids"}
+                            session.add(node)
+                            session.commit()
+                            continue
+                        params = {
+                            "prompt": f"{final_prompt}{_batch_camera_suffix(batch_camera_mode)}",
+                            "project_id": project_id,
+                            "ref_media_ids": ref_media_ids,
+                            "duration_s": node.data.get("durationS") or node.data.get("omniFlashDuration") or omni_flash_duration or 4,
+                            "aspect_ratio": node.data.get("aspectRatio") or batch_video_aspect_ratio,
+                            "paygate_tier": paygate_tier,
+                        }
+                        req_type = "gen_video_omni"
+                    else:
+                        start_media_ids = []
+                        seen_start_ids = set()
+                        for edge in parent_edges:
+                            p_node = node_map.get(edge.source_id)
+                            if p_node and p_node.type in ("image", "Storyboard"):
+                                mid = _select_node_media_id(p_node, edge)
+                                if mid and mid not in seen_start_ids:
+                                    start_media_ids.append(mid)
+                                    seen_start_ids.add(mid)
+                        if not start_media_ids:
+                            failed_nodes.add(nid)
+                            node.status = "error"
+                            node.data = {
+                                **dict(node.data),
+                                "error": "missing_upstream_image",
+                                "errorHint": _friendly_generation_error("missing_upstream_image"),
+                            }
+                            session.add(node)
+                            session.commit()
+                            continue
+
+                        params = {
+                            "prompt": f"{final_prompt}{_batch_camera_suffix(batch_camera_mode)}",
+                            "project_id": project_id,
+                            "aspect_ratio": node.data.get("aspectRatio") or batch_video_aspect_ratio,
+                            "paygate_tier": paygate_tier,
+                            "video_quality": node.data.get("videoQuality") or video_quality or "fast",
+                        }
+                        if len(start_media_ids) > 1:
+                            params["start_media_ids"] = start_media_ids
+                        else:
+                            params["start_media_id"] = start_media_ids[0]
+                        req_type = "gen_video"
                     
                 node.status = "queued"
                 session.add(node)
@@ -578,13 +729,20 @@ async def run_batch_generation(assembly_node_id: int, project_id: str, paygate_t
                     node_data["mediaIds"] = media_ids
                     node_data["renderedAt"] = datetime.now(timezone.utc).isoformat()
                     node_data.pop("error", None) # clear old error
+                    node_data.pop("errorHint", None) # clear old friendly error
                     node.data = node_data
                     session.add(node)
                     session.commit()
+                    node_map[nid] = node
                 else:
                     failed_nodes.add(nid)
                     node.status = "error"
-                    node.data = {**dict(node.data), "error": settled.error or "generation failed"}
+                    error_message = settled.error or "generation failed"
+                    node.data = {
+                        **dict(node.data),
+                        "error": error_message,
+                        "errorHint": _friendly_generation_error(error_message),
+                    }
                     session.add(node)
                     session.commit()
                     
@@ -622,7 +780,14 @@ async def generate_all_nodes(
         run_batch_generation,
         node_id,
         project_id,
-        paygate_tier
+        paygate_tier,
+        req.image_model,
+        req.video_quality,
+        req.video_model,
+        req.omni_flash_duration,
+        req.batch_video_aspect_ratio,
+        req.batch_camera_mode,
+        req.retry_failed,
     )
     return {"ok": True, "message": "Batch generation started"}
 

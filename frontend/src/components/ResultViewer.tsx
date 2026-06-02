@@ -369,14 +369,18 @@ export function ResultViewer() {
         return;
       }
       const useMulti = sourceMediaIds.length > 1;
-      dispatchGeneration(rfId, {
+      const regeneratePayload = {
         prompt: data.prompt ?? "",
-        kind: "video",
+        kind: "video" as const,
         sourceMediaId: useMulti ? undefined : sourceMediaIds[0],
         sourceMediaIds: useMulti ? sourceMediaIds : undefined,
         aspectRatio,
         variantCount: sourceMediaIds.length,
-      });
+      };
+      closeResultViewer();
+      window.setTimeout(() => {
+        void dispatchGeneration(rfId, regeneratePayload);
+      }, 0);
       return;
     }
     dispatchGeneration(rfId, {

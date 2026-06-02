@@ -87,6 +87,12 @@ export interface FlowboardNodeData extends Record<string, unknown> {
   charVibe?: string;
   charGender?: string;
   error?: string;
+  errorHint?: string;
+  batchGenerating?: boolean;
+  autoAssembleAfterBatch?: boolean;
+  batchVideoAspectRatio?: string;
+  batchCameraMode?: string;
+  retryFailedClips?: boolean;
   // Storyboard layout. The Storyboard node is now a thin image-node
   // wrapper that generates a single composite using a locked prompt
   // template `Create visual storyboard for "<topic>" as SINGLE IMAGE
@@ -427,6 +433,12 @@ export const useBoardStore = create<BoardState>((set, get) => ({
           charGender: n.data["charGender"] as string | undefined,
           storyboardGrid: n.data["storyboardGrid"] as StoryboardGrid | undefined,
           error: n.data["error"] as string | undefined,
+          errorHint: n.data["errorHint"] as string | undefined,
+          batchGenerating: n.data["batchGenerating"] as boolean | undefined,
+          autoAssembleAfterBatch: n.data["autoAssembleAfterBatch"] as boolean | undefined,
+          batchVideoAspectRatio: n.data["batchVideoAspectRatio"] as string | undefined,
+          batchCameraMode: n.data["batchCameraMode"] as string | undefined,
+          retryFailedClips: n.data["retryFailedClips"] as boolean | undefined,
         },
       }));
       const edges: Edge[] = detail.edges.map(edgeFromDto);

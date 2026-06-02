@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useBoardStore, type FlowboardNodeData, type FlowNode } from "../store/board";
+import { useSettingsStore } from "../store/settings";
 import { mediaUrl, patchNode } from "../api/client";
 
 interface VideoAssemblyDialogProps {
@@ -11,6 +12,10 @@ interface VideoAssemblyDialogProps {
 export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialogProps) {
   const nodes = useBoardStore((s) => s.nodes);
   const edges = useBoardStore((s) => s.edges);
+  const imageModel = useSettingsStore((s) => s.imageModel);
+  const videoQuality = useSettingsStore((s) => s.videoQuality);
+  const videoModel = useSettingsStore((s) => s.videoModel);
+  const omniFlashDuration = useSettingsStore((s) => s.omniFlashDuration);
 
   const [orderedVideos, setOrderedVideos] = useState<FlowNode[]>([]);
   const [audioMediaId, setAudioMediaId] = useState<string | null>(
@@ -31,7 +36,22 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
   const audioRef = useRef<HTMLAudioElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
 
-  const [batchGenerating, setBatchGenerating] = useState(false);
+  const [batchGenerating, setBatchGenerating] = useState(
+    Boolean(data.batchGenerating) || false
+  );
+  const [autoAssembleAfterBatch, setAutoAssembleAfterBatch] = useState(
+    Boolean(data.autoAssembleAfterBatch) || false
+  );
+  const [batchVideoAspectRatio, setBatchVideoAspectRatio] = useState(
+    data.batchVideoAspectRatio || "VIDEO_ASPECT_RATIO_PORTRAIT"
+  );
+  const [batchCameraMode, setBatchCameraMode] = useState(
+    data.batchCameraMode || "dynamic"
+  );
+  const [retryFailedClips, setRetryFailedClips] = useState(
+    Boolean(data.retryFailedClips) || false
+  );
+  const autoAssembleTriggeredRef = useRef(false);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Lọc và quét các video node kết nối để phục vụ dependency key tối ưu
@@ -41,22 +61,67 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
     (n) => upstreamNodeIds.includes(n.id) && n.data.type === "video"
   );
   
+  const totalConnected = connectedVideos.length;
   const unrenderedCount = connectedVideos.filter((n) => !n.data.mediaId).length;
+  const renderedCount = connectedVideos.filter((n) => !!n.data.mediaId).length;
+  const runningCount = connectedVideos.filter(
+    (n) => n.data.status === "queued" || n.data.status === "running"
+  ).length;
+  const erroredVideos = connectedVideos.filter((n) => n.data.status === "error" && !n.data.mediaId);
+  const errorCount = erroredVideos.length;
+  const hasActiveClipRequests = runningCount > 0;
+  const shouldShowBatchProgress = batchGenerating || hasActiveClipRequests;
   
-  // Tự động tắt trạng thái batch generating khi không còn node nào ở trạng thái queued hoặc running
+  // Tự động theo dõi batch: chỉ hoàn tất khi mọi video đã có mediaId,
+  // hoặc dừng với lỗi rõ ràng khi không còn request chạy nhưng vẫn thiếu clip.
   useEffect(() => {
-    const isAnyQueuedOrRunning = connectedVideos.some(
-      (n) => n.data.status === "queued" || n.data.status === "running"
-    );
-    
-    if (batchGenerating && !isAnyQueuedOrRunning) {
+    const autoAssemblePending = autoAssembleAfterBatch || Boolean(data.autoAssembleAfterBatch);
+    if (!batchGenerating && !autoAssemblePending) return;
+
+    if (unrenderedCount === 0 && totalConnected > 0) {
       setBatchGenerating(false);
+      useBoardStore.getState().updateNodeData(rfId, {
+        batchGenerating: false,
+        autoAssembleAfterBatch: false,
+      });
+      const dbId = parseInt(rfId, 10);
+      if (!isNaN(dbId)) {
+        void patchNode(dbId, {
+          data: { batchGenerating: false, autoAssembleAfterBatch: false },
+        });
+      }
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current);
         pollIntervalRef.current = null;
       }
+      if (autoAssemblePending && !autoAssembleTriggeredRef.current && !assembling) {
+        autoAssembleTriggeredRef.current = true;
+        void handleAssemble();
+      }
+      return;
     }
-  }, [connectedVideos, batchGenerating]);
+
+    if (runningCount === 0 && unrenderedCount > 0 && errorCount > 0) {
+      setBatchGenerating(false);
+      useBoardStore.getState().updateNodeData(rfId, {
+        batchGenerating: false,
+        autoAssembleAfterBatch: false,
+      });
+      const dbId = parseInt(rfId, 10);
+      if (!isNaN(dbId)) {
+        void patchNode(dbId, {
+          data: { batchGenerating: false, autoAssembleAfterBatch: false },
+        });
+      }
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+      const firstErrored = connectedVideos.find((n) => n.data.status === "error");
+      const firstError = firstErrored?.data.error || "Một số clip tạo thất bại.";
+      setError(`Batch dừng: ${firstError}`);
+    }
+  }, [batchGenerating, unrenderedCount, totalConnected, autoAssembleAfterBatch, assembling, runningCount, errorCount, connectedVideos]);
 
   // Dọn dẹp poller khi unmount
   useEffect(() => {
@@ -78,27 +143,75 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
     }, 1500);
   };
 
-  const startBatchGenerate = async () => {
-    setBatchGenerating(true);
+  useEffect(() => {
+    if (hasActiveClipRequests || Boolean(data.batchGenerating)) {
+      setBatchGenerating(true);
+      startBoardPolling();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasActiveClipRequests, data.batchGenerating]);
+
+  const startBatchGenerate = async (shouldAutoAssemble = false) => {
+    setAutoAssembleAfterBatch(shouldAutoAssemble);
+    const dbId = parseInt(rfId, 10);
+    autoAssembleTriggeredRef.current = false;
+    setError(null);
     try {
-      const dbId = parseInt(rfId, 10);
       const response = await fetch(`/api/video-assembly/node/${dbId}/generate-all`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({
+          image_model: imageModel,
+          video_quality: videoQuality,
+          video_model: videoModel,
+          omni_flash_duration: omniFlashDuration,
+          auto_assemble: shouldAutoAssemble,
+          batch_video_aspect_ratio: batchVideoAspectRatio,
+          batch_camera_mode: batchCameraMode,
+          retry_failed: retryFailedClips,
+        }),
       });
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${response.status}`);
       }
+      setBatchGenerating(true);
+      useBoardStore.getState().updateNodeData(rfId, {
+        batchGenerating: true,
+        autoAssembleAfterBatch: shouldAutoAssemble,
+        batchVideoAspectRatio,
+        batchCameraMode,
+        retryFailedClips,
+      });
+      if (!isNaN(dbId)) {
+        void patchNode(dbId, {
+          data: {
+            batchGenerating: true,
+            autoAssembleAfterBatch: shouldAutoAssemble,
+            batchVideoAspectRatio,
+            batchCameraMode,
+            retryFailedClips,
+          },
+        });
+      }
       startBoardPolling();
     } catch (err: any) {
       alert(`Lỗi khởi tạo hàng loạt: ${err.message || err}`);
       setBatchGenerating(false);
+      setAutoAssembleAfterBatch(false);
+      useBoardStore.getState().updateNodeData(rfId, {
+        batchGenerating: false,
+        autoAssembleAfterBatch: false,
+      });
+      if (!isNaN(dbId)) {
+        void patchNode(dbId, {
+          data: { batchGenerating: false, autoAssembleAfterBatch: false },
+        });
+      }
     }
   };
   const connectedMediaIdsKey = connectedVideos
-    .map((n) => `${n.id}:${n.data.mediaId || ""}`)
+    .map((n) => `${n.id}:${n.data.mediaId || ""}:${n.data.status || ""}:${n.data.error || ""}`)
     .join(",");
 
   // 1. Quét và sắp xếp các video node đầu vào (Tránh kích hoạt thừa)
@@ -292,7 +405,7 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
   };
 
   // Kích hoạt tiến trình ghép nối video ở backend
-  const handleAssemble = async () => {
+  async function handleAssemble() {
     if (orderedVideos.length === 0) {
       alert("Vui lòng kết nối ít nhất 1 clip video đầu vào từ canvas.");
       return;
@@ -354,9 +467,8 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
     } finally {
       setAssembling(false);
     }
-  };
+  }
 
-  const totalConnected = orderedVideos.length;
 
   return (
     <div
@@ -407,32 +519,118 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
           {totalConnected > 0 && (
             <div style={{ marginBottom: 12, display: "flex", flexDirection: "column", gap: 8 }}>
               {unrenderedCount > 0 && !batchGenerating && (
-                <button
-                  type="button"
-                  onClick={startBatchGenerate}
-                  disabled={assembling}
-                  style={{
-                    background: "linear-gradient(135deg, #7c5cff 0%, #a05cff 100%)",
-                    color: "#fff",
-                    border: "none",
-                    borderRadius: 6,
-                    padding: "8px 14px",
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: "pointer",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 6,
-                    alignSelf: "flex-start",
-                    transition: "all 0.15s ease",
-                    boxShadow: "0 2px 8px rgba(124, 92, 255, 0.25)"
-                  }}
-                >
-                  ⚡ Tạo hàng loạt {unrenderedCount} clip chưa vẽ
-                </button>
+                <div style={{
+                  background: "rgba(124, 92, 255, 0.08)",
+                  border: "1px solid rgba(124, 92, 255, 0.18)",
+                  borderRadius: 10,
+                  padding: 12,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 10,
+                }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
+                    ⚙️ Cấu hình trước khi tạo video hàng loạt
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <span style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600 }}>Kích thước video</span>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {[
+                        ["VIDEO_ASPECT_RATIO_PORTRAIT", "9:16 dọc TikTok/Reels"],
+                        ["VIDEO_ASPECT_RATIO_LANDSCAPE", "16:9 ngang YouTube"],
+                      ].map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setBatchVideoAspectRatio(value)}
+                          className={`aspect-chip${batchVideoAspectRatio === value ? " aspect-chip--active" : ""}`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <span style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600 }}>Camera</span>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {[
+                        ["dynamic", "Dynamic · động nhẹ"],
+                        ["static", "Static · camera tĩnh"],
+                        ["cinematic", "Cinematic · điện ảnh"],
+                      ].map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setBatchCameraMode(value)}
+                          className={`aspect-chip${batchCameraMode === value ? " aspect-chip--active" : ""}`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {errorCount > 0 && (
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--muted)" }}>
+                      <input
+                        type="checkbox"
+                        checked={retryFailedClips}
+                        onChange={(e) => setRetryFailedClips(e.target.checked)}
+                      />
+                      Tạo lại cả các clip đang báo lỗi
+                    </label>
+                  )}
+                </div>
               )}
 
-              {batchGenerating && (
+              {unrenderedCount > 0 && !batchGenerating && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    onClick={() => startBatchGenerate(false)}
+                    disabled={assembling}
+                    style={{
+                      background: "linear-gradient(135deg, #7c5cff 0%, #a05cff 100%)",
+                      color: "#fff",
+                      border: "none",
+                      borderRadius: 6,
+                      padding: "8px 14px",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      transition: "all 0.15s ease",
+                      boxShadow: "0 2px 8px rgba(124, 92, 255, 0.25)"
+                    }}
+                  >
+                    ⚡ Tạo tất cả {unrenderedCount} clip còn thiếu
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => startBatchGenerate(true)}
+                    disabled={assembling}
+                    style={{
+                      background: "linear-gradient(135deg, #10b981 0%, #06b6d4 100%)",
+                      color: "#fff",
+                      border: "none",
+                      borderRadius: 6,
+                      padding: "8px 14px",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      transition: "all 0.15s ease",
+                      boxShadow: "0 2px 8px rgba(6, 182, 212, 0.25)"
+                    }}
+                  >
+                    🚀 Tạo xong tự ghép
+                  </button>
+                </div>
+              )}
+
+              {shouldShowBatchProgress && (
                 <div style={{
                   background: "var(--panel-high)",
                   border: "1px solid rgba(124, 92, 255, 0.3)",
@@ -446,17 +644,23 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12 }}>
                     <span style={{ fontWeight: 600, color: "var(--accent)", display: "flex", alignItems: "center", gap: 6 }}>
                       <span className="video-assembly__spinner" style={{ width: 12, height: 12, marginRight: 6 }} />
-                      Đang tạo video hàng loạt...
+                      {autoAssembleAfterBatch ? "Đang tạo clip, xong sẽ tự ghép..." : "Đang tạo video hàng loạt..."}
                     </span>
                     <span style={{ color: "var(--muted)" }}>
-                      {totalConnected - unrenderedCount}/{totalConnected} clip ({Math.round(((totalConnected - unrenderedCount) / totalConnected) * 100)}%)
+                      {renderedCount}/{totalConnected} clip ({Math.round((renderedCount / totalConnected) * 100)}%)
                     </span>
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--muted)", display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <span>✅ Xong: {renderedCount}</span>
+                    <span>⏳ Đang chạy: {runningCount}</span>
+                    <span>🧩 Còn thiếu: {unrenderedCount}</span>
+                    {errorCount > 0 && <span style={{ color: "#fca5a5" }}>⚠️ Lỗi: {errorCount}</span>}
                   </div>
                   <div style={{ background: "rgba(255,255,255,0.06)", height: 6, borderRadius: 3, overflow: "hidden" }}>
                     <div style={{
                       background: "linear-gradient(90deg, #7c5cff 0%, #a05cff 100%)",
                       height: "100%",
-                      width: `${Math.round(((totalConnected - unrenderedCount) / totalConnected) * 100)}%`,
+                      width: `${Math.round((renderedCount / totalConnected) * 100)}%`,
                       transition: "width 0.3s ease"
                     }} />
                   </div>
@@ -520,6 +724,15 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
                       <div className="video-assembly__clip-prompt" title={promptText}>
                         {promptText.length > 55 ? promptText.substring(0, 55) + "…" : promptText}
                       </div>
+                      {!isReady && videoNode.data.status && (
+                        <div style={{ marginTop: 4, fontSize: 10, color: videoNode.data.status === "error" ? "#fca5a5" : "var(--muted)" }}>
+                          {videoNode.data.status === "error"
+                            ? `⚠️ ${videoNode.data.errorHint || videoNode.data.error || "Tạo clip thất bại"}`
+                            : videoNode.data.status === "queued" || videoNode.data.status === "running"
+                              ? `⏳ ${videoNode.data.status === "queued" ? "Đang chờ" : "Đang tạo"}`
+                              : "🧩 Chưa có media"}
+                        </div>
+                      )}
                     </div>
                   </div>
                 );

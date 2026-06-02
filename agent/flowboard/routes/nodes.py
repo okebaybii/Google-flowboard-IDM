@@ -285,6 +285,51 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                 ).first()
                 if assembly_node:
                     assembly_node_id = assembly_node.id
+            
+            # Find all reference nodes connected upstream to the story_script node
+            incoming_script_edges = s.exec(
+                select(Edge).where(Edge.target_id == node_id)
+            ).all()
+            
+            upstream_refs = []
+            allowed_ref_types = {"character", "style_preset", "image", "visual_asset", "prompt", "Storyboard"}
+            
+            for se in incoming_script_edges:
+                sn = s.get(Node, se.source_id)
+                if sn and sn.type in allowed_ref_types:
+                    if sn.id not in upstream_refs:
+                        upstream_refs.append(sn.id)
+                        
+            # Also search upstream of the video_assembly node if connected
+            if assembly_node_id:
+                incoming_assembly_edges = s.exec(
+                    select(Edge).where(Edge.target_id == assembly_node_id)
+                ).all()
+                for se in incoming_assembly_edges:
+                    sn = s.get(Node, se.source_id)
+                    if sn and sn.type in allowed_ref_types:
+                        if sn.id not in upstream_refs:
+                            upstream_refs.append(sn.id)
+                            
+            # Fallback 1: if no style preset is in refs, query all style presets on this board
+            has_style = any(s.get(Node, rid).type == "style_preset" for rid in upstream_refs if s.get(Node, rid))
+            if not has_style:
+                board_presets = s.exec(
+                    select(Node).where(Node.board_id == board_id, Node.type == "style_preset")
+                ).all()
+                for bp in board_presets:
+                    if bp.id not in upstream_refs:
+                        upstream_refs.append(bp.id)
+                
+            # Fallback 2: if no character is in refs, query all characters on this board
+            has_char = any(s.get(Node, rid).type == "character" for rid in upstream_refs if s.get(Node, rid))
+            if not has_char:
+                board_characters = s.exec(
+                    select(Node).where(Node.board_id == board_id, Node.type == "character")
+                ).all()
+                for bc in board_characters:
+                    if bc.id not in upstream_refs:
+                        upstream_refs.append(bc.id)
                     
             base_x = node.x
             base_y = node.y
@@ -307,6 +352,16 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                 )
                 s.add(img_node)
                 s.flush()
+                
+                # Auto-connect all upstream reference nodes to the newly spawned image node
+                for ref_id in upstream_refs:
+                    edge_ref = Edge(
+                        board_id=board_id,
+                        source_id=ref_id,
+                        target_id=img_node.id,
+                        kind="ref"
+                    )
+                    s.add(edge_ref)
                 
                 # Spawn video node
                 vid_short_id = generate_unique_short_id(s, board_id)
