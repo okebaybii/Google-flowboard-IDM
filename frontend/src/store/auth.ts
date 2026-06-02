@@ -65,14 +65,22 @@ export const useAuthStore = create<AuthState>((set, get) => {
         return await response.json();
       }
       
-      const errData = await response.json().catch(() => ({}));
-      if (response.status === 403 && errData.detail === "account_not_approved") {
-        set({ error: "Tài khoản của bạn đang chờ Admin kích hoạt trên Firebase Console. Vui lòng liên hệ quản trị viên!" });
-      } else if (errData.detail === "session_conflict") {
-        set({ sessionConflict: true });
-      } else {
-        set({ error: errData.detail || "Đăng nhập thất bại." });
+      let errorMsg = "Đăng nhập thất bại.";
+      try {
+        const errData = await response.json();
+        if (response.status === 403 && errData.detail === "account_not_approved") {
+          errorMsg = "Tài khoản của bạn đang chờ Admin kích hoạt trên Firebase Console. Vui lòng liên hệ quản trị viên!";
+        } else if (errData.detail === "session_conflict") {
+          set({ sessionConflict: true });
+          return null;
+        } else {
+          const detailStr = typeof errData.detail === 'string' ? errData.detail : JSON.stringify(errData.detail);
+          errorMsg = `Lỗi (${response.status}): ${detailStr || "Đăng nhập thất bại."}`;
+        }
+      } catch (e) {
+        errorMsg = `Lỗi kết nối (${response.status}): Không thể giải mã phản hồi từ máy chủ.`;
       }
+      set({ error: errorMsg });
       return null;
     } catch (err) {
       console.error("Failed to register session on backend:", err);
