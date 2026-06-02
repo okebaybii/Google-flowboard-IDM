@@ -78,6 +78,10 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
   const hasActiveClipRequests = runningCount > 0;
   const shouldShowBatchProgress = batchGenerating || hasActiveClipRequests;
   
+  const connectedMediaIdsKey = connectedVideos
+    .map((n) => `${n.id}:${n.data.mediaId || ""}:${n.data.status || ""}:${n.data.error || ""}`)
+    .join(",");
+
   // Tự động theo dõi batch: chỉ hoàn tất khi mọi video đã có mediaId,
   // hoặc dừng với lỗi rõ ràng khi không còn request chạy nhưng vẫn thiếu clip.
   useEffect(() => {
@@ -87,16 +91,22 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
     if (unrenderedCount === 0 && totalConnected > 0) {
       setBatchGenerating(false);
       setAutoAssembleAfterBatch(false);
-      useBoardStore.getState().updateNodeData(rfId, {
-        batchGenerating: false,
-        autoAssembleAfterBatch: false,
-      });
-      const dbId = parseInt(rfId, 10);
-      if (!isNaN(dbId)) {
-        void patchNode(dbId, {
-          data: { batchGenerating: false, autoAssembleAfterBatch: false },
+      
+      const currentBatchGen = Boolean(data.batchGenerating);
+      const currentAutoAssemble = Boolean(data.autoAssembleAfterBatch);
+      if (currentBatchGen || currentAutoAssemble) {
+        useBoardStore.getState().updateNodeData(rfId, {
+          batchGenerating: false,
+          autoAssembleAfterBatch: false,
         });
+        const dbId = parseInt(rfId, 10);
+        if (!isNaN(dbId)) {
+          void patchNode(dbId, {
+            data: { batchGenerating: false, autoAssembleAfterBatch: false },
+          });
+        }
       }
+
       if (!autoAssemblePending) {
         if (pollIntervalRef.current) {
           clearInterval(pollIntervalRef.current);
@@ -109,16 +119,22 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
     if (runningCount === 0 && unrenderedCount > 0 && errorCount > 0) {
       setBatchGenerating(false);
       setAutoAssembleAfterBatch(false);
-      useBoardStore.getState().updateNodeData(rfId, {
-        batchGenerating: false,
-        autoAssembleAfterBatch: false,
-      });
-      const dbId = parseInt(rfId, 10);
-      if (!isNaN(dbId)) {
-        void patchNode(dbId, {
-          data: { batchGenerating: false, autoAssembleAfterBatch: false },
+
+      const currentBatchGen = Boolean(data.batchGenerating);
+      const currentAutoAssemble = Boolean(data.autoAssembleAfterBatch);
+      if (currentBatchGen || currentAutoAssemble) {
+        useBoardStore.getState().updateNodeData(rfId, {
+          batchGenerating: false,
+          autoAssembleAfterBatch: false,
         });
+        const dbId = parseInt(rfId, 10);
+        if (!isNaN(dbId)) {
+          void patchNode(dbId, {
+            data: { batchGenerating: false, autoAssembleAfterBatch: false },
+          });
+        }
       }
+
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current);
         pollIntervalRef.current = null;
@@ -127,7 +143,7 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
       const firstError = firstErrored?.data.error || "Một số clip tạo thất bại.";
       setError(`Batch dừng: ${firstError}`);
     }
-  }, [batchGenerating, unrenderedCount, totalConnected, autoAssembleAfterBatch, assembling, runningCount, errorCount, connectedVideos]);
+  }, [batchGenerating, unrenderedCount, totalConnected, autoAssembleAfterBatch, assembling, runningCount, errorCount, connectedMediaIdsKey]);
 
   // Dọn dẹp poller khi unmount
   useEffect(() => {
@@ -218,9 +234,6 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
       }
     }
   };
-  const connectedMediaIdsKey = connectedVideos
-    .map((n) => `${n.id}:${n.data.mediaId || ""}:${n.data.status || ""}:${n.data.error || ""}`)
-    .join(",");
 
   // 1. Quét và sắp xếp các video node đầu vào (Tránh kích hoạt thừa)
   useEffect(() => {
