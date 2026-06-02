@@ -714,221 +714,269 @@ async def run_batch_generation(
         failed_nodes = set()
         
         for nid in order:
-            with get_session() as session:
-                node = session.get(Node, nid)
-                if not node:
-                    continue
-                
-                # Skip if already done
-                media_id = node.data.get("mediaId")
-                if node.status == "done" and media_id:
-                    logger.info(f"Node {nid} is already done. Skipping.")
-                    continue
-                if node.status == "error" and media_id and not retry_failed:
-                    logger.info(f"Node {nid} is error but already has media. Skipping.")
-                    failed_nodes.add(nid)
-                    continue
+            try:
+                with get_session() as session:
+                    node = session.get(Node, nid)
+                    if not node:
+                        continue
                     
-                # Upstream failure check
-                parent_edges = incoming[nid]
-                parent_ids = [edge.source_id for edge in parent_edges]
-                upstream_failed = any(p in failed_nodes for p in parent_ids)
-                if upstream_failed:
-                    failed_nodes.add(nid)
-                    node.status = "error"
-                    node.data = {**dict(node.data), "error": "upstream_failed"}
-                    session.add(node)
-                    session.commit()
-                    continue
+                    # Skip if already done
+                    media_id = node.data.get("mediaId")
+                    if node.status == "done" and media_id:
+                        logger.info(f"Node {nid} is already done. Skipping.")
+                        continue
+                    if node.status == "error" and media_id and not retry_failed:
+                        logger.info(f"Node {nid} is error but already has media. Skipping.")
+                        failed_nodes.add(nid)
+                        continue
+                        
+                    # Upstream failure check
+                    parent_edges = incoming[nid]
+                    parent_ids = [edge.source_id for edge in parent_edges]
+                    upstream_failed = any(p in failed_nodes for p in parent_ids)
+                    if upstream_failed:
+                        failed_nodes.add(nid)
+                        node.status = "error"
+                        node.data = {**dict(node.data), "error": "upstream_failed"}
+                        session.add(node)
+                        session.commit()
+                        continue
+                        
+                    prompt = node.data.get("prompt", "").strip()
+                    if not prompt:
+                        failed_nodes.add(nid)
+                        node.status = "error"
+                        node.data = {**dict(node.data), "error": "missing_prompt"}
+                        session.add(node)
+                        session.commit()
+                        continue
+                        
+                    # Check style preset target
+                    style_edges = session.exec(
+                        select(Edge).where(Edge.target_id == nid)
+                    ).all()
+                    style_node = None
+                    for se in style_edges:
+                        sn = session.get(Node, se.source_id)
+                        if sn and sn.type == "style_preset":
+                            style_node = sn
+                            break
                     
-                prompt = node.data.get("prompt", "").strip()
-                if not prompt:
-                    failed_nodes.add(nid)
-                    node.status = "error"
-                    node.data = {**dict(node.data), "error": "missing_prompt"}
-                    session.add(node)
-                    session.commit()
-                    continue
+                    final_prompt = prompt
+                    if style_node:
+                        style_id = style_node.data.get("activeStyleId", "hollywood")
+                        suffix = STYLE_PROMPTS.get(style_id, "")
+                        if suffix:
+                            final_prompt = f"{prompt}{suffix}"
                     
-                # Check style preset target
-                style_edges = session.exec(
-                    select(Edge).where(Edge.target_id == nid)
-                ).all()
-                style_node = None
-                for se in style_edges:
-                    sn = session.get(Node, se.source_id)
-                    if sn and sn.type == "style_preset":
-                        style_node = sn
-                        break
-                
-                final_prompt = prompt
-                if style_node:
-                    style_id = style_node.data.get("activeStyleId", "hollywood")
-                    suffix = STYLE_PROMPTS.get(style_id, "")
-                    if suffix:
-                        final_prompt = f"{prompt}{suffix}"
-                
-                # Build dispatch params. Match the manual generation path as
-                # closely as possible so batch output keeps the same character,
-                # visual asset, style, and pinned variant context.
-                ref_source_types = {"character", "image", "visual_asset", "Storyboard"}
-                if node.type in ("image", "Storyboard"):
-                    upstream_refs = _collect_reference_media_ids(
-                        nid,
-                        node_map,
-                        incoming,
-                        ref_source_types,
-                    )
-
-                    # Map batch_video_aspect_ratio to corresponding image aspect_ratio
-                    img_aspect = node.data.get("aspectRatio")
-                    if batch_video_aspect_ratio:
-                        if batch_video_aspect_ratio == "VIDEO_ASPECT_RATIO_PORTRAIT":
-                            img_aspect = "IMAGE_ASPECT_RATIO_PORTRAIT"
-                        elif batch_video_aspect_ratio == "VIDEO_ASPECT_RATIO_LANDSCAPE":
-                            img_aspect = "IMAGE_ASPECT_RATIO_LANDSCAPE"
-                    if not img_aspect:
-                        img_aspect = "IMAGE_ASPECT_RATIO_LANDSCAPE"
-
-                    params = {
-                        "prompt": final_prompt,
-                        "project_id": project_id,
-                        "aspect_ratio": img_aspect,
-                        "paygate_tier": paygate_tier,
-                        "variant_count": node.data.get("variantCount") or 1,
-                        "image_model": node.data.get("imageModel") or image_model or "NANO_BANANA_2",
-                    }
-                    if upstream_refs:
-                        params["ref_media_ids"] = upstream_refs
-                    prompts = node.data.get("prompts")
-                    if isinstance(prompts, list) and prompts:
-                        params["prompts"] = prompts
-                    req_type = "gen_image"
-                else:  # video
-                    video_model_value = node.data.get("videoModel") or node.data.get("model") or video_model or "veo"
-                    is_omni = video_model_value == "omni_flash"
+                    # Build dispatch params. Match the manual generation path as
+                    # closely as possible so batch output keeps the same character,
+                    # visual asset, style, and pinned variant context.
+                    ref_source_types = {"character", "image", "visual_asset", "Storyboard"}
                     
-                    vid_aspect = node.data.get("aspectRatio") or batch_video_aspect_ratio
-                    if batch_video_aspect_ratio:
-                        vid_aspect = batch_video_aspect_ratio
-
-                    if is_omni:
-                        ref_media_ids = _collect_reference_media_ids(
+                    img_aspect = "IMAGE_ASPECT_RATIO_LANDSCAPE"
+                    vid_aspect = "VIDEO_ASPECT_RATIO_LANDSCAPE"
+                    
+                    if node.type in ("image", "Storyboard"):
+                        upstream_refs = _collect_reference_media_ids(
                             nid,
                             node_map,
                             incoming,
                             ref_source_types,
                         )
-                        if not ref_media_ids:
-                            failed_nodes.add(nid)
-                            node.status = "error"
-                            node.data = {**dict(node.data), "error": "missing_ref_media_ids"}
-                            session.add(node)
-                            session.commit()
-                            continue
+
+                        # Map batch_video_aspect_ratio to corresponding image aspect_ratio
+                        img_aspect = node.data.get("aspectRatio")
+                        if batch_video_aspect_ratio:
+                            if batch_video_aspect_ratio == "VIDEO_ASPECT_RATIO_PORTRAIT":
+                                img_aspect = "IMAGE_ASPECT_RATIO_PORTRAIT"
+                            elif batch_video_aspect_ratio == "VIDEO_ASPECT_RATIO_LANDSCAPE":
+                                img_aspect = "IMAGE_ASPECT_RATIO_LANDSCAPE"
+                        if not img_aspect:
+                            img_aspect = "IMAGE_ASPECT_RATIO_LANDSCAPE"
+
                         params = {
-                            "prompt": f"{final_prompt}{_batch_camera_suffix(batch_camera_mode)}",
+                            "prompt": final_prompt,
                             "project_id": project_id,
-                            "ref_media_ids": ref_media_ids,
-                            "duration_s": node.data.get("durationS") or node.data.get("omniFlashDuration") or omni_flash_duration or 4,
-                            "aspect_ratio": vid_aspect,
+                            "aspect_ratio": img_aspect,
                             "paygate_tier": paygate_tier,
+                            "variant_count": node.data.get("variantCount") or 1,
+                            "image_model": node.data.get("imageModel") or image_model or "NANO_BANANA_2",
                         }
-                        req_type = "gen_video_omni"
+                        if upstream_refs:
+                            params["ref_media_ids"] = upstream_refs
+                        prompts = node.data.get("prompts")
+                        if isinstance(prompts, list) and prompts:
+                            params["prompts"] = prompts
+                        req_type = "gen_image"
+                    else:  # video
+                        video_model_value = node.data.get("videoModel") or node.data.get("model") or video_model or "veo"
+                        is_omni = video_model_value == "omni_flash"
+                        
+                        vid_aspect = node.data.get("aspectRatio") or batch_video_aspect_ratio
+                        if batch_video_aspect_ratio:
+                            vid_aspect = batch_video_aspect_ratio
+
+                        if is_omni:
+                            ref_media_ids = _collect_reference_media_ids(
+                                nid,
+                                node_map,
+                                incoming,
+                                ref_source_types,
+                            )
+                            if not ref_media_ids:
+                                failed_nodes.add(nid)
+                                node.status = "error"
+                                node.data = {**dict(node.data), "error": "missing_ref_media_ids"}
+                                session.add(node)
+                                session.commit()
+                                continue
+                            params = {
+                                "prompt": f"{final_prompt}{_batch_camera_suffix(batch_camera_mode)}",
+                                "project_id": project_id,
+                                "ref_media_ids": ref_media_ids,
+                                "duration_s": node.data.get("durationS") or node.data.get("omniFlashDuration") or omni_flash_duration or 4,
+                                "aspect_ratio": vid_aspect,
+                                "paygate_tier": paygate_tier,
+                            }
+                            req_type = "gen_video_omni"
+                        else:
+                            start_media_ids = []
+                            seen_start_ids = set()
+                            for edge in parent_edges:
+                                p_node = node_map.get(edge.source_id)
+                                if p_node and p_node.type in ("image", "Storyboard"):
+                                    mid = _select_node_media_id(p_node, edge)
+                                    if mid and mid not in seen_start_ids:
+                                        start_media_ids.append(mid)
+                                        seen_start_ids.add(mid)
+                            if not start_media_ids:
+                                failed_nodes.add(nid)
+                                node.status = "error"
+                                node.data = {
+                                    **dict(node.data),
+                                    "error": "missing_upstream_image",
+                                    "errorHint": _friendly_generation_error("missing_upstream_image"),
+                                }
+                                session.add(node)
+                                session.commit()
+                                continue
+
+                            params = {
+                                "prompt": f"{final_prompt}{_batch_camera_suffix(batch_camera_mode)}",
+                                "project_id": project_id,
+                                "aspect_ratio": vid_aspect,
+                                "paygate_tier": paygate_tier,
+                                "video_quality": node.data.get("videoQuality") or video_quality or "fast",
+                            }
+                            if len(start_media_ids) > 1:
+                                params["start_media_ids"] = start_media_ids
+                            else:
+                                params["start_media_id"] = start_media_ids[0]
+                            req_type = "gen_video"
+
+                # We try generating the node with auto-retry up to 2 attempts
+                max_attempts = 2
+                settled = None
+                error_message = "generation failed"
+                success = False
+
+                for attempt_idx in range(max_attempts):
+                    logger.info(f"Node {nid} generation attempt {attempt_idx + 1}/{max_attempts}")
+                    with get_session() as session:
+                        node = session.get(Node, nid)
+                        if not node:
+                            break
+                        node.status = "queued"
+                        node_data = dict(node.data)
+                        if node.type in ("image", "Storyboard"):
+                            node_data["aspectRatio"] = img_aspect
+                        else:
+                            node_data["aspectRatio"] = vid_aspect
+                        node.data = node_data
+                        session.add(node)
+                        session.commit()
+                        
+                        req = Request(
+                            node_id=nid,
+                            type=req_type,
+                            params=params,
+                            status="queued",
+                        )
+                        session.add(req)
+                        session.commit()
+                        session.refresh(req)
+                        req_id = req.id
+                        
+                    # Await request outside DB session lock
+                    get_worker().enqueue(req_id)
+                    try:
+                        settled = await _await_request(req_id)
+                        if settled.status == "done":
+                            success = True
+                            break
+                        else:
+                            error_message = settled.error or "generation failed"
+                            logger.warning(f"Node {nid} attempt {attempt_idx + 1} failed: {error_message}")
+                    except Exception as ex:
+                        error_message = str(ex)
+                        logger.warning(f"Node {nid} attempt {attempt_idx + 1} raised error: {ex}")
+                    
+                    if attempt_idx < max_attempts - 1:
+                        # Brief sleep between retries
+                        await asyncio.sleep(2.0)
+
+                with get_session() as session:
+                    node = session.get(Node, nid)
+                    if not node:
+                        continue
+                    if success and settled and settled.status == "done":
+                        result = settled.result or {}
+                        media_ids = result.get("media_ids") or []
+                        media_id = None
+                        for m in media_ids:
+                            if m:
+                                media_id = m
+                                break
+                        node.status = "done"
+                        node_data = dict(node.data)
+                        node_data["mediaId"] = media_id
+                        node_data["mediaIds"] = media_ids
+                        node_data["renderedAt"] = datetime.now(timezone.utc).isoformat()
+                        node_data.pop("error", None) # clear old error
+                        node_data.pop("errorHint", None) # clear old friendly error
+                        node.data = node_data
+                        session.add(node)
+                        session.commit()
+                        node_map[nid] = node
                     else:
-                        start_media_ids = []
-                        seen_start_ids = set()
-                        for edge in parent_edges:
-                            p_node = node_map.get(edge.source_id)
-                            if p_node and p_node.type in ("image", "Storyboard"):
-                                mid = _select_node_media_id(p_node, edge)
-                                if mid and mid not in seen_start_ids:
-                                    start_media_ids.append(mid)
-                                    seen_start_ids.add(mid)
-                        if not start_media_ids:
-                            failed_nodes.add(nid)
+                        failed_nodes.add(nid)
+                        node.status = "error"
+                        node.data = {
+                            **dict(node.data),
+                            "error": error_message,
+                            "errorHint": _friendly_generation_error(error_message),
+                        }
+                        session.add(node)
+                        session.commit()
+
+            except Exception as loop_err:
+                logger.error(f"Failed during batch processing of node {nid}: {loop_err}", exc_info=True)
+                failed_nodes.add(nid)
+                try:
+                    with get_session() as session:
+                        node = session.get(Node, nid)
+                        if node:
                             node.status = "error"
                             node.data = {
                                 **dict(node.data),
-                                "error": "missing_upstream_image",
-                                "errorHint": _friendly_generation_error("missing_upstream_image"),
+                                "error": str(loop_err),
+                                "errorHint": _friendly_generation_error(str(loop_err)),
                             }
                             session.add(node)
                             session.commit()
-                            continue
-
-                        params = {
-                            "prompt": f"{final_prompt}{_batch_camera_suffix(batch_camera_mode)}",
-                            "project_id": project_id,
-                            "aspect_ratio": vid_aspect,
-                            "paygate_tier": paygate_tier,
-                            "video_quality": node.data.get("videoQuality") or video_quality or "fast",
-                        }
-                        if len(start_media_ids) > 1:
-                            params["start_media_ids"] = start_media_ids
-                        else:
-                            params["start_media_id"] = start_media_ids[0]
-                        req_type = "gen_video"
-                    
-                node.status = "queued"
-                node_data = dict(node.data)
-                if node.type in ("image", "Storyboard"):
-                    node_data["aspectRatio"] = img_aspect
-                else:
-                    node_data["aspectRatio"] = vid_aspect
-                node.data = node_data
-                session.add(node)
-                session.commit()
-                
-                req = Request(
-                    node_id=nid,
-                    type=req_type,
-                    params=params,
-                    status="queued",
-                )
-                session.add(req)
-                session.commit()
-                session.refresh(req)
-                req_id = req.id
-                
-            # Await request outside DB session lock
-            get_worker().enqueue(req_id)
-            settled = await _await_request(req_id)
-            
-            with get_session() as session:
-                node = session.get(Node, nid)
-                if not node:
-                    continue
-                if settled.status == "done":
-                    result = settled.result or {}
-                    media_ids = result.get("media_ids") or []
-                    media_id = None
-                    for m in media_ids:
-                        if m:
-                            media_id = m
-                            break
-                    node.status = "done"
-                    node_data = dict(node.data)
-                    node_data["mediaId"] = media_id
-                    node_data["mediaIds"] = media_ids
-                    node_data["renderedAt"] = datetime.now(timezone.utc).isoformat()
-                    node_data.pop("error", None) # clear old error
-                    node_data.pop("errorHint", None) # clear old friendly error
-                    node.data = node_data
-                    session.add(node)
-                    session.commit()
-                    node_map[nid] = node
-                else:
-                    failed_nodes.add(nid)
-                    node.status = "error"
-                    error_message = settled.error or "generation failed"
-                    node.data = {
-                        **dict(node.data),
-                        "error": error_message,
-                        "errorHint": _friendly_generation_error(error_message),
-                    }
-                    session.add(node)
-                    session.commit()
+                except Exception as db_err:
+                    logger.error(f"Could not write failure status for node {nid} to DB: {db_err}")
         
         # Auto-assemble at the end of the batch if requested and all nodes succeeded
         if auto_assemble and not failed_nodes:
