@@ -251,8 +251,22 @@ def _run_moviepy_assembly(
                 try:
                     # Create temporary TTS file
                     temp_tts_path = f"temp_tts_{i}_{os.getpid()}.mp3"
-                    tts = gTTS(text=narration_text.strip(), lang="vi")
-                    tts.save(temp_tts_path)
+                    
+                    try:
+                        import edge_tts
+                        import asyncio
+                        
+                        async def _gen_edge_tts():
+                            communicate = edge_tts.Communicate(narration_text.strip(), "vi-VN-HoaiMyNeural")
+                            await communicate.save(temp_tts_path)
+                            
+                        asyncio.run(_gen_edge_tts())
+                        logger.info(f"Edge TTS: Generated emotional neural voiceover for scene {i+1}")
+                    except Exception as edge_err:
+                        logger.warning(f"Edge TTS failed, falling back to gTTS: {edge_err}")
+                        tts = gTTS(text=narration_text.strip(), lang="vi")
+                        tts.save(temp_tts_path)
+                        
                     temp_files.append(temp_tts_path)
                     
                     # Load TTS audio
