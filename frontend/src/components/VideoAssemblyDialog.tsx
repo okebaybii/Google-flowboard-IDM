@@ -86,6 +86,7 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
 
     if (unrenderedCount === 0 && totalConnected > 0) {
       setBatchGenerating(false);
+      setAutoAssembleAfterBatch(false);
       useBoardStore.getState().updateNodeData(rfId, {
         batchGenerating: false,
         autoAssembleAfterBatch: false,
@@ -107,6 +108,7 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
 
     if (runningCount === 0 && unrenderedCount > 0 && errorCount > 0) {
       setBatchGenerating(false);
+      setAutoAssembleAfterBatch(false);
       useBoardStore.getState().updateNodeData(rfId, {
         batchGenerating: false,
         autoAssembleAfterBatch: false,
