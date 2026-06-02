@@ -247,10 +247,11 @@ def _run_moviepy_assembly(
         # 3. Concatenate video clips with a beautiful 0.4s crossfade transition
         use_crossfade = len(clips) > 1 and all(c.duration > 0.8 for c in clips)
         if use_crossfade:
+            from moviepy.video.fx import CrossFadeIn
             fade_clips = []
             for idx, c in enumerate(clips):
                 if idx > 0:
-                    c = c.crossfadein(0.4)
+                    c = c.with_effects([CrossFadeIn(0.4)])
                 fade_clips.append(c)
             final_clip = concatenate_videoclips(fade_clips, method="compose", padding=-0.4)
         else:
