@@ -191,8 +191,8 @@ def _run_moviepy_assembly(
     
     This function executes in a separate thread to prevent blocking the async loop.
     """
-    from moviepy import VideoFileClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip
-    from moviepy.video.fx import Resize, Crop
+    from moviepy import VideoFileClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip, ImageClip
+    from moviepy.video.fx import Resize, Crop, MultiplySpeed
     from gtts import gTTS
     import os
 
@@ -228,7 +228,7 @@ def _run_moviepy_assembly(
         total_raw_duration = sum(c.duration for c in raw_clips)
         beats = detect_audio_beats(audio_path, total_raw_duration) if audio_path else []
 
-        # 2. Load video clips, align durations to beats, and generate aligned TTS narration audio
+        # 2. Load video clips, align durations, and generate aligned TTS narration audio
         cumulative_time = 0.0
         for i, clip in enumerate(raw_clips):
             natural_duration = clip.duration
@@ -243,26 +243,56 @@ def _run_moviepy_assembly(
                         clip = clip.subclipped(0, new_duration)
                         logger.info(f"Beat-matching: aligned scene {i+1} duration from {natural_duration:.2f}s to {new_duration:.2f}s (beat at {closest_beat:.2f}s)")
             
-            clips.append(clip)
-            
-            # Kiểm tra nếu phân cảnh này có lời thoại thuyết minh
+            # Generate TTS narration audio for this scene
             narration_text = narrations[i] if i < len(narrations) else ""
+            tts_duration = 0.0
+            tts_clip = None
             if narration_text and narration_text.strip():
                 try:
-                    # Tạo file âm thanh thuyết minh tạm thời
+                    # Create temporary TTS file
                     temp_tts_path = f"temp_tts_{i}_{os.getpid()}.mp3"
                     tts = gTTS(text=narration_text.strip(), lang="vi")
                     tts.save(temp_tts_path)
                     temp_files.append(temp_tts_path)
                     
-                    # Nạp audio thuyết minh và thiết lập bắt đầu khớp thời lượng phân cảnh
+                    # Load TTS audio
                     tts_clip = AudioFileClip(temp_tts_path)
-                    tts_clip = tts_clip.with_start(cumulative_time)
-                    tts_audio_clips.append(tts_clip)
+                    tts_duration = tts_clip.duration
                 except Exception as tts_err:
                     logger.error(f"Failed to generate TTS for scene {i}: {tts_err}")
+            
+            # Dynamic speed stretching or hybrid freeze-frame to sync frames to narration
+            if tts_duration > clip.duration:
+                factor = clip.duration / tts_duration
+                if factor >= 0.5:
+                    # Stretch speed down to match narration length perfectly
+                    logger.info(f"Speed Stretching: slow down scene {i+1} from {clip.duration:.2f}s to {tts_duration:.2f}s (factor {factor:.2f})")
+                    try:
+                        clip = clip.with_effects([MultiplySpeed(factor)])
+                    except Exception as speed_err:
+                        logger.error(f"Failed to apply speed stretching: {speed_err}")
+                else:
+                    # Limit slowdown to 50%, freeze the last frame for remaining duration
+                    logger.info(f"Speed Hybrid: slow down to 50% speed and freeze last frame.")
+                    try:
+                        clip = clip.with_effects([MultiplySpeed(0.5)])
+                        freeze_duration = tts_duration - clip.duration
+                        last_frame = clip.get_frame(clip.duration - 0.05)
+                        fps = clip.fps or 24
+                        freeze_clip = ImageClip(last_frame).with_duration(freeze_duration).with_fps(fps)
+                        clip = concatenate_videoclips([clip, freeze_clip])
+                    except Exception as hybrid_err:
+                        logger.error(f"Failed to apply hybrid speed/freeze effect: {hybrid_err}")
+            
+            # Append final processed clip
+            clips.append(clip)
+            
+            # Position the narration audio clip
+            if tts_clip:
+                tts_clip = tts_clip.with_start(cumulative_time)
+                tts_audio_clips.append(tts_clip)
                     
-            # Tăng mốc offset thời gian dựa trên thời lượng thực tế của clip đã căn chỉnh
+            # Update cumulative time based on the actual duration of the final clip
             cumulative_time += clip.duration
         
         # 3. Concatenate video clips directly (direct cuts) as requested
