@@ -3,7 +3,6 @@ import { useBoardStore } from "../store/board";
 import { useAuthStore } from "../store/auth";
 import { ActivityBell } from "./activity/ActivityBell";
 import { AiProviderBadge } from "./AiProviderBadge";
-import { AdminPanelDialog } from "./AdminPanelDialog";
 
 export function Toolbar() {
   const boardName = useBoardStore((s) => s.boardName);
@@ -14,7 +13,6 @@ export function Toolbar() {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
-  const [isAdminOpen, setIsAdminOpen] = useState(false);
 
   function startEdit() {
     setDraft(boardName);
@@ -77,36 +75,6 @@ export function Toolbar() {
             <span style={{ fontSize: 12, color: "#9ca3af" }} title={authUser.email}>
               {authUser.name || authUser.email}
             </span>
-            
-            {authUser.is_admin && (
-              <button
-                onClick={() => setIsAdminOpen(true)}
-                style={{
-                  background: "rgba(124, 92, 255, 0.12)",
-                  border: "1px solid rgba(124, 92, 255, 0.25)",
-                  color: "#a78bfa",
-                  padding: "4px 10px",
-                  borderRadius: 6,
-                  fontSize: 11,
-                  cursor: "pointer",
-                  fontWeight: 600,
-                  transition: "all 0.15s ease",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 4
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "rgba(124, 92, 255, 0.25)";
-                  e.currentTarget.style.color = "#fff";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "rgba(124, 92, 255, 0.12)";
-                  e.currentTarget.style.color = "#a78bfa";
-                }}
-              >
-                Quản lý 🔑
-              </button>
-            )}
 
             <button
               onClick={() => logout()}
@@ -138,8 +106,6 @@ export function Toolbar() {
           </div>
         )}
       </div>
-
-      <AdminPanelDialog isOpen={isAdminOpen} onClose={() => setIsAdminOpen(false)} />
     </div>
   );
 }

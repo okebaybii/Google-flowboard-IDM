@@ -55,25 +55,60 @@ def register_session(req: RegisterSessionRequest) -> dict:
     uid = user_info["uid"]
     email = user_info.get("email", "")
     
+    has_firebase = len(firebase_admin._apps) > 0
+    
     with get_session() as session:
-        # 1. Manage user account registration & activation status
         user_acc = session.get(UserAccount, uid)
+        
+        # If it's a new account, we register it locally
         if not user_acc:
             # Check if this is the first user in the database
             first_user = session.exec(select(UserAccount)).first() is None
+            
+            # Disable subsequent users in Firebase Console so the admin must enable them
+            if has_firebase and not first_user:
+                try:
+                    firebase_auth.update_user(uid, disabled=True)
+                    logger.info(f"Programmatically disabled new Firebase user {email} ({uid}) pending Admin activation.")
+                except Exception as e:
+                    logger.error(f"Failed to programmatically disable Firebase user: {e}")
+                    
             user_acc = UserAccount(
                 firebase_uid=uid,
                 email=email,
-                is_approved=True if first_user else False,  # First user is auto-approved as Admin
+                is_approved=True if first_user else False,
                 is_admin=True if first_user else False
             )
             session.add(user_acc)
             session.commit()
             session.refresh(user_acc)
-            logger.info(f"Registered new UserAccount {email} (is_approved: {user_acc.is_approved}, is_admin: {user_acc.is_admin})")
+            logger.info(f"Registered local UserAccount {email} (is_approved: {user_acc.is_approved}, is_admin: {user_acc.is_admin})")
             
-        if not user_acc.is_approved:
-            logger.warning(f"Login blocked: User {email} ({uid}) is not approved yet.")
+        # Verify disabled status directly in Firebase Console (source of truth)
+        if has_firebase:
+            try:
+                fb_user = firebase_auth.get_user(uid)
+                if fb_user.disabled:
+                    if user_acc.is_approved:
+                        user_acc.is_approved = False
+                        session.add(user_acc)
+                        session.commit()
+                    logger.warning(f"Login blocked: User {email} ({uid}) is disabled in Firebase Console.")
+                    raise HTTPException(status_code=403, detail="account_not_approved")
+                else:
+                    # Sync local state if Admin enabled them in Firebase Console
+                    if not user_acc.is_approved:
+                        user_acc.is_approved = True
+                        session.add(user_acc)
+                        session.commit()
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to check Firebase user disabled state: {e}")
+                raise HTTPException(status_code=403, detail="account_not_approved")
+                
+        elif not user_acc.is_approved:
+            logger.warning(f"Login blocked (Mock mode): User {email} ({uid}) is not approved.")
             raise HTTPException(status_code=403, detail="account_not_approved")
             
         # 2. Manage session concurrency
@@ -112,12 +147,24 @@ def heartbeat(
     
     user_info = verify_firebase_token(id_token)
     uid = user_info["uid"]
+    has_firebase = len(firebase_admin._apps) > 0
     
     with get_session() as session:
-        # Check approval status
-        user_acc = session.get(UserAccount, uid)
-        if not user_acc or not user_acc.is_approved:
-            raise HTTPException(status_code=403, detail="account_not_approved")
+        # Check approval status in Firebase Console directly
+        if has_firebase:
+            try:
+                fb_user = firebase_auth.get_user(uid)
+                if fb_user.disabled:
+                    raise HTTPException(status_code=403, detail="account_not_approved")
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to verify Firebase status in heartbeat: {e}")
+                raise HTTPException(status_code=403, detail="account_not_approved")
+        else:
+            user_acc = session.get(UserAccount, uid)
+            if not user_acc or not user_acc.is_approved:
+                raise HTTPException(status_code=403, detail="account_not_approved")
 
         user_sess = session.get(UserSession, uid)
         if not user_sess or user_sess.active_session_id != x_session_id:
@@ -156,75 +203,26 @@ async def check_active_session_globally(
     id_token = authorization.split(" ")[1]
     user_info = verify_firebase_token(id_token)
     uid = user_info["uid"]
+    has_firebase = len(firebase_admin._apps) > 0
 
     with get_session() as session:
-        # Verify approval status
-        user_acc = session.get(UserAccount, uid)
-        if not user_acc or not user_acc.is_approved:
-            raise HTTPException(status_code=403, detail="account_not_approved")
+        # Verify approval status in Firebase Console directly
+        if has_firebase:
+            try:
+                fb_user = firebase_auth.get_user(uid)
+                if fb_user.disabled:
+                    raise HTTPException(status_code=403, detail="account_not_approved")
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to check Firebase user disabled state globally: {e}")
+                raise HTTPException(status_code=403, detail="account_not_approved")
+        else:
+            user_acc = session.get(UserAccount, uid)
+            if not user_acc or not user_acc.is_approved:
+                raise HTTPException(status_code=403, detail="account_not_approved")
 
         user_sess = session.get(UserSession, uid)
         if not user_sess or user_sess.active_session_id != x_session_id:
             logger.warning(f"Session conflict blocked request to {path} for user {uid}.")
             raise HTTPException(status_code=401, detail="session_conflict")
-
-
-# ============================================================================
-# ADMIN ENDPOINTS FOR USER ACCOUNT PROVISIONING
-# ============================================================================
-
-def verify_admin_user(authorization: str = Header(...)) -> UserAccount:
-    """Helper dependency to verify that the requesting user is an active admin."""
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="invalid_auth_header")
-    id_token = authorization.split(" ")[1]
-    user_info = verify_firebase_token(id_token)
-    uid = user_info["uid"]
-    
-    with get_session() as session:
-        user_acc = session.get(UserAccount, uid)
-        if not user_acc or not user_acc.is_approved:
-            raise HTTPException(status_code=403, detail="account_not_approved")
-        if not user_acc.is_admin:
-            raise HTTPException(status_code=403, detail="admin_only")
-        return user_acc
-
-
-@router.get("/admin/users")
-def get_all_users(admin: UserAccount = Depends(verify_admin_user)):
-    """Fetch all registered user accounts for the admin dashboard."""
-    with get_session() as session:
-        users = session.exec(select(UserAccount).order_by(UserAccount.created_at.desc())).all()
-        return [
-            {
-                "firebase_uid": u.firebase_uid,
-                "email": u.email,
-                "is_approved": u.is_approved,
-                "is_admin": u.is_admin,
-                "created_at": u.created_at.isoformat() if u.created_at else None
-            }
-            for u in users
-        ]
-
-
-class ApproveUserRequest(BaseModel):
-    target_uid: str
-    approve: bool
-
-
-@router.post("/admin/approve")
-def approve_user(req: ApproveUserRequest, admin: UserAccount = Depends(verify_admin_user)):
-    """Approve/activate or suspend a user account."""
-    if req.target_uid == admin.firebase_uid:
-        raise HTTPException(status_code=400, detail="cannot_modify_self")
-        
-    with get_session() as session:
-        user = session.get(UserAccount, req.target_uid)
-        if not user:
-            raise HTTPException(status_code=404, detail="user_not_found")
-        user.is_approved = req.approve
-        session.add(user)
-        session.commit()
-        logger.info(f"Admin {admin.email} set user {user.email} is_approved={req.approve}")
-        
-    return {"ok": True}

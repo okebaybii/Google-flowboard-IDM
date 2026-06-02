@@ -202,7 +202,14 @@ export const useAuthStore = create<AuthState>((set, get) => {
             set({ user: null, token: null, loading: false });
           }
         } catch (err: any) {
-          set({ error: err.message, loading: false });
+          if (err.code === "auth/user-disabled") {
+            set({
+              error: "Tài khoản của bạn đã được đăng ký nhưng chưa được kích hoạt hoặc đã bị khóa trên Firebase Console. Vui lòng liên hệ Admin!",
+              loading: false
+            });
+          } else {
+            set({ error: err.message, loading: false });
+          }
         }
       } else {
         // Mock Login
