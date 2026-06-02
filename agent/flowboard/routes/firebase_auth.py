@@ -50,6 +50,9 @@ def register_session(req: RegisterSessionRequest) -> dict:
     
     has_firebase = len(firebase_admin._apps) > 0
     
+    is_admin = False
+    is_approved = False
+    
     with get_session() as session:
         user_acc = session.get(UserAccount, uid)
         
@@ -104,6 +107,10 @@ def register_session(req: RegisterSessionRequest) -> dict:
             logger.warning(f"Login blocked (Mock mode): User {email} ({uid}) is not approved.")
             raise HTTPException(status_code=403, detail="account_not_approved")
             
+        # Extract fields before session closes
+        is_admin = user_acc.is_admin
+        is_approved = user_acc.is_approved
+
         # 2. Manage session concurrency
         user_sess = session.get(UserSession, uid)
         if not user_sess:
@@ -123,8 +130,8 @@ def register_session(req: RegisterSessionRequest) -> dict:
         "ok": True, 
         "uid": uid, 
         "email": email, 
-        "is_admin": user_acc.is_admin, 
-        "is_approved": user_acc.is_approved
+        "is_admin": is_admin, 
+        "is_approved": is_approved
     }
 
 
