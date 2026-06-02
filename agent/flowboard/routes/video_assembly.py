@@ -266,7 +266,7 @@ def _run_moviepy_assembly(
             cumulative_time += clip.duration
         
         # 3. Concatenate video clips directly (direct cuts) as requested
-        final_clip = concatenate_videoclips(clips, method="compose")
+        final_clip = concatenate_videoclips(clips, method="chain")
         video_duration = final_clip.duration
         
         # 4. Mix audio components (Background Music at 20% volume + TTS Voiceover)
@@ -364,9 +364,17 @@ async def _assemble_videos_impl(
             if not video_nodes:
                 raise HTTPException(status_code=400, detail="No connected 'video' nodes found.")
                 
-            # Determine aspect ratio from first video node dynamically
+            # Determine aspect ratio dynamically
             resolved_aspect_ratio = "16:9"
-            if video_nodes:
+            raw_assembly_aspect = node.data.get("batchVideoAspectRatio") or node.data.get("aspectRatio")
+            if raw_assembly_aspect:
+                if "PORTRAIT" in raw_assembly_aspect or raw_assembly_aspect == "9:16":
+                    resolved_aspect_ratio = "9:16"
+                elif "LANDSCAPE" in raw_assembly_aspect or raw_assembly_aspect == "16:9":
+                    resolved_aspect_ratio = "16:9"
+                else:
+                    resolved_aspect_ratio = raw_assembly_aspect
+            elif video_nodes:
                 raw_aspect = video_nodes[0].data.get("aspectRatio") or "16:9"
                 if "PORTRAIT" in raw_aspect:
                     resolved_aspect_ratio = "9:16"
