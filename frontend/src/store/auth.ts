@@ -5,7 +5,8 @@ import {
   signOut, 
   GoogleAuthProvider, 
   signInWithPopup,
-  onAuthStateChanged 
+  onAuthStateChanged,
+  sendEmailVerification 
 } from "firebase/auth";
 import { firebaseAuth, hasRealFirebase } from "../lib/firebase";
 
@@ -86,6 +87,17 @@ export const useAuthStore = create<AuthState>((set, get) => {
       if (hasRealFirebase && firebaseAuth) {
         onAuthStateChanged(firebaseAuth, async (fbUser) => {
           if (fbUser) {
+            if (!fbUser.emailVerified) {
+              // Sign out if email is not verified
+              await signOut(firebaseAuth);
+              set({ 
+                user: null, 
+                token: null, 
+                loading: false, 
+                error: "Tài khoản của bạn chưa được kích hoạt. Vui lòng xác thực email trong hộp thư để tiếp tục." 
+              });
+              return;
+            }
             try {
               const token = await fbUser.getIdToken();
               const ok = await registerSessionOnBackend(token);
@@ -145,6 +157,18 @@ export const useAuthStore = create<AuthState>((set, get) => {
       if (hasRealFirebase && firebaseAuth) {
         try {
           const cred = await signInWithEmailAndPassword(firebaseAuth, email, password);
+          if (!cred.user.emailVerified) {
+            // Trigger verification email again and sign out
+            await sendEmailVerification(cred.user);
+            await signOut(firebaseAuth);
+            set({
+              user: null,
+              token: null,
+              loading: false,
+              error: "Tài khoản chưa được kích hoạt! Một email xác nhận mới đã được gửi tới hòm thư của bạn. Vui lòng xác thực trước khi đăng nhập."
+            });
+            return;
+          }
           const token = await cred.user.getIdToken();
           await registerSessionOnBackend(token);
         } catch (err: any) {
@@ -175,8 +199,16 @@ export const useAuthStore = create<AuthState>((set, get) => {
       if (hasRealFirebase && firebaseAuth) {
         try {
           const cred = await createUserWithEmailAndPassword(firebaseAuth, email, password);
-          const token = await cred.user.getIdToken();
-          await registerSessionOnBackend(token);
+          // Send verification email
+          await sendEmailVerification(cred.user);
+          // Sign out immediately so they cannot login without verifying
+          await signOut(firebaseAuth);
+          set({
+            user: null,
+            token: null,
+            loading: false,
+            error: "Đăng ký thành công! Vui lòng kiểm tra email của bạn để xác thực/kích hoạt tài khoản trước khi đăng nhập."
+          });
         } catch (err: any) {
           set({ error: err.message, loading: false });
         }

@@ -1,11 +1,14 @@
 import { useState, useRef, type KeyboardEvent } from "react";
 import { useBoardStore } from "../store/board";
+import { useAuthStore } from "../store/auth";
 import { ActivityBell } from "./activity/ActivityBell";
 import { AiProviderBadge } from "./AiProviderBadge";
 
 export function Toolbar() {
   const boardName = useBoardStore((s) => s.boardName);
   const renameBoard = useBoardStore((s) => s.renameBoard);
+  const authUser = useAuthStore((s) => s.user);
+  const logout = useAuthStore((s) => s.logout);
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -57,9 +60,50 @@ export function Toolbar() {
         </button>
       )}
 
-      <div className="toolbar-actions">
+      <div className="toolbar-actions" style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <ActivityBell />
         <AiProviderBadge />
+        {authUser && (
+          <div className="toolbar-user-menu" style={{ 
+            display: "flex", 
+            alignItems: "center", 
+            gap: 8, 
+            marginLeft: 12,
+            borderLeft: "1px solid rgba(255, 255, 255, 0.1)",
+            paddingLeft: 12
+          }}>
+            <span style={{ fontSize: 12, color: "#9ca3af" }} title={authUser.email}>
+              {authUser.name || authUser.email}
+            </span>
+            <button
+              onClick={() => logout()}
+              style={{
+                background: "rgba(239, 68, 68, 0.12)",
+                border: "1px solid rgba(239, 68, 68, 0.25)",
+                color: "#f87171",
+                padding: "4px 10px",
+                borderRadius: 6,
+                fontSize: 11,
+                cursor: "pointer",
+                fontWeight: 600,
+                transition: "all 0.15s ease",
+                display: "flex",
+                alignItems: "center",
+                gap: 4
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "rgba(239, 68, 68, 0.25)";
+                e.currentTarget.style.color = "#fff";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "rgba(239, 68, 68, 0.12)";
+                e.currentTarget.style.color = "#f87171";
+              }}
+            >
+              Đăng xuất 🚪
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -46,3 +46,10 @@ coverage/
 # comments as source-of-truth, but contains raw OAuth bearer tokens.
 # Keep on disk; never commit.
 /video_model*.md
+
+# Credentials and secrets
+*service-account*.json
+firebase-service-account.json
+.env
+.env.development
+.env.production
