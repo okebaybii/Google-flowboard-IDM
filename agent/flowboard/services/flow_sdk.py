@@ -732,7 +732,7 @@ class FlowSDK:
                 )
                 continue
             status_code = resp.get("status")
-            if isinstance(status_code, int) and status_code >= 400 and status_code != 404:
+            if isinstance(status_code, int) and status_code >= 400 and status_code not in (404, 500, 502, 503, 504):
                 # Surface the inner Flow error (e.g. content filter).
                 inner = _extract_inner_api_error(resp)
                 ops_summary.append(

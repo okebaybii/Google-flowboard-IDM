@@ -78,7 +78,7 @@ def swap_faces_in_video(char_img_path: str, video_path: str, output_path: str) -
         return False
         
     try:
-        from moviepy.editor import VideoFileClip
+        from moviepy import VideoFileClip
         import cv2
         
         char_img = cv2.imread(char_img_path)

@@ -93,6 +93,7 @@ export interface FlowboardNodeData extends Record<string, unknown> {
   batchVideoAspectRatio?: string;
   batchCameraMode?: string;
   retryFailedClips?: boolean;
+  assemblyProgress?: number;
   // Storyboard layout. The Storyboard node is now a thin image-node
   // wrapper that generates a single composite using a locked prompt
   // template `Create visual storyboard for "<topic>" as SINGLE IMAGE
@@ -293,6 +294,7 @@ export const useBoardStore = create<BoardState>((set, get) => ({
           charVibe: n.data["charVibe"] as string | undefined,
           charGender: n.data["charGender"] as string | undefined,
           storyboardGrid: n.data["storyboardGrid"] as StoryboardGrid | undefined,
+          assemblyProgress: n.data["assemblyProgress"] as number | undefined,
         },
       }));
 
@@ -349,6 +351,7 @@ export const useBoardStore = create<BoardState>((set, get) => ({
           charVibe: n.data["charVibe"] as string | undefined,
           charGender: n.data["charGender"] as string | undefined,
           storyboardGrid: n.data["storyboardGrid"] as StoryboardGrid | undefined,
+          assemblyProgress: n.data["assemblyProgress"] as number | undefined,
         },
       }));
       const edges: Edge[] = detail.edges.map(edgeFromDto);
@@ -439,6 +442,7 @@ export const useBoardStore = create<BoardState>((set, get) => ({
           batchVideoAspectRatio: n.data["batchVideoAspectRatio"] as string | undefined,
           batchCameraMode: n.data["batchCameraMode"] as string | undefined,
           retryFailedClips: n.data["retryFailedClips"] as boolean | undefined,
+          assemblyProgress: n.data["assemblyProgress"] as number | undefined,
         },
       }));
       const edges: Edge[] = detail.edges.map(edgeFromDto);

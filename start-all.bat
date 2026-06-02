@@ -28,7 +28,7 @@ goto shown
 :hidden
 echo Dang chay Backend va Frontend an... (Starting in background...)
 echo Set WshShell = CreateObject("WScript.Shell") > run_hidden.vbs
-echo WshShell.Run "cmd /c cd /d """ ^& WScript.Arguments(0) ^& """ && call .venv\Scripts\activate.bat && python -m uvicorn flowboard.main:app --host 127.0.0.1 --port 8101", 0, False >> run_hidden.vbs
+echo WshShell.Run "cmd /c cd /d """ ^& WScript.Arguments(0) ^& """ && call .venv\Scripts\activate.bat && python -m uvicorn flowboard.main:app --host 127.0.0.1 --port 8101 --reload", 0, False >> run_hidden.vbs
 echo WshShell.Run "cmd /c cd /d """ ^& WScript.Arguments(1) ^& """ && npm run dev", 0, False >> run_hidden.vbs
 
 cscript //nologo run_hidden.vbs "%~dp0agent" "%~dp0frontend"
@@ -45,7 +45,7 @@ exit
 :shown
 echo Dang chay Backend...
 cd /d "%~dp0agent"
-start "Flowboard Backend" cmd /k "call .venv\Scripts\activate.bat && python -m uvicorn flowboard.main:app --host 127.0.0.1 --port 8101"
+start "Flowboard Backend" cmd /k "call .venv\Scripts\activate.bat && python -m uvicorn flowboard.main:app --host 127.0.0.1 --port 8101 --reload"
 
 echo Dang chay Frontend...
 cd /d "%~dp0frontend"

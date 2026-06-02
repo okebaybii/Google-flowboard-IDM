@@ -342,6 +342,18 @@ export function Board() {
     return () => el.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  // Poll board state periodically when any node is running (e.g. video_assembly is compiling)
+  useEffect(() => {
+    const hasRunningNode = nodes.some((n) => n.data.status === "running");
+    if (!hasRunningNode) return;
+
+    const timer = setInterval(() => {
+      void useBoardStore.getState().refreshBoardState();
+    }, 1500);
+
+    return () => clearInterval(timer);
+  }, [nodes]);
+
   return (
     <div
       ref={wrapperRef}

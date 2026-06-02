@@ -139,6 +139,17 @@ async def _handle_gen_image(params: dict) -> tuple[dict, Optional[str]]:
             media_service.ingest_urls(entries_with_urls)
         except Exception:  # noqa: BLE001
             logger.exception("auto-ingest from gen_image response failed")
+    
+    # Extract media_ids from media_entries so the processor's node update
+    # logic (lines 803-811) can populate node.data.mediaId/mediaIds correctly.
+    # This matches the response structure from _handle_gen_video.
+    media_ids = [
+        e.get("media_id") for e in (resp.get("media_entries") or [])
+        if isinstance(e, dict) and isinstance(e.get("media_id"), str)
+    ]
+    if media_ids:
+        resp["media_ids"] = media_ids
+    
     return resp, None
 
 
@@ -437,8 +448,142 @@ async def _handle_edit_image(params: dict) -> tuple[dict, Optional[str]]:
             media_service.ingest_urls(entries_with_urls)
         except Exception:  # noqa: BLE001
             logger.exception("auto-ingest from edit_image response failed")
+    
+    # Extract media_ids from media_entries so the processor's node update
+    # logic (lines 803-811) can populate node.data.mediaId/mediaIds correctly.
+    # This matches the response structure from _handle_gen_image and _handle_gen_video.
+    media_ids = [
+        e.get("media_id") for e in (resp.get("media_entries") or [])
+        if isinstance(e, dict) and isinstance(e.get("media_id"), str)
+    ]
+    if media_ids:
+        resp["media_ids"] = media_ids
+    
     return resp, None
 
+
+def _trigger_downstream_videos(source_node_id: int, start_media_id: str) -> None:
+    """Auto-trigger video generation for downstream Video nodes after image completion.
+    
+    When an image node completes successfully, this function finds all connected
+    downstream Video nodes (with prompts) and automatically enqueues video
+    generation requests using the newly generated image as the start frame.
+    
+    Args:
+        source_node_id: The database ID of the completed image node
+        start_media_id: The mediaId from the completed image to use as video start frame
+    """
+    try:
+        from flowboard.db.models import Edge, Node, BoardFlowProject
+        from sqlmodel import select
+        
+        with get_session() as s:
+            # Find all downstream edges from this image node
+            edges = s.exec(
+                select(Edge).where(Edge.source_id == source_node_id)
+            ).all()
+            
+            if not edges:
+                return
+            
+            # Get the source node to retrieve board_id and project_id
+            source_node = s.get(Node, source_node_id)
+            if not source_node:
+                return
+            
+            board_id = source_node.board_id
+            
+            # Get project_id for this board
+            board_project = s.get(BoardFlowProject, board_id)
+            if not board_project or not board_project.flow_project_id:
+                logger.warning(
+                    "auto-trigger: board %s has no project_id, skipping downstream videos",
+                    board_id
+                )
+                return
+            
+            project_id = board_project.flow_project_id
+            
+            # Get paygate tier from flow_client (will be used for all triggered videos)
+            from flowboard.services.flow_client import flow_client
+            tier = flow_client.paygate_tier
+            if tier is None:
+                logger.warning("auto-trigger: paygate_tier unknown, skipping downstream videos")
+                return
+            
+            # Process each downstream node
+            for edge in edges:
+                target_node = s.get(Node, edge.target_id)
+                if not target_node:
+                    continue
+                
+                # Only auto-trigger Video nodes
+                if target_node.type != "video":
+                    continue
+                
+                # Skip if node doesn't have a prompt
+                node_data = target_node.data or {}
+                prompt = node_data.get("prompt")
+                if not isinstance(prompt, str) or not prompt.strip():
+                    logger.info(
+                        "auto-trigger: skipping video node %s (no prompt)",
+                        target_node.short_id
+                    )
+                    continue
+                
+                # Skip if node is already running/queued/done
+                if target_node.status in ("running", "queued", "done"):
+                    logger.info(
+                        "auto-trigger: skipping video node %s (status=%s)",
+                        target_node.short_id, target_node.status
+                    )
+                    continue
+                
+                # Create and enqueue video generation request
+                req = Request(
+                    node_id=target_node.id,
+                    type="gen_video",
+                    params={
+                        "prompt": prompt.strip(),
+                        "project_id": project_id,
+                        "start_media_id": start_media_id,
+                        "aspect_ratio": node_data.get("aspectRatio") or "VIDEO_ASPECT_RATIO_LANDSCAPE",
+                        "paygate_tier": tier,
+                        "video_quality": node_data.get("videoQuality"),
+                    },
+                    status="queued",
+                )
+                s.add(req)
+                s.flush()
+                assert req.id is not None
+                
+                # Update target node status to queued
+                target_node.status = "queued"
+                s.add(target_node)
+                
+                logger.info(
+                    "auto-trigger: enqueued video generation for node %s (req_id=%s)",
+                    target_node.short_id, req.id
+                )
+            
+            s.commit()
+            
+            # Enqueue all created requests to the worker
+            with get_session() as s2:
+                recent_reqs = s2.exec(
+                    select(Request).where(
+                        Request.node_id.in_([e.target_id for e in edges]),  # type: ignore[attr-defined]
+                        Request.status == "queued",
+                        Request.type == "gen_video",
+                    )
+                ).all()
+                
+                for req in recent_reqs:
+                    if req.id is not None:
+                        get_worker().enqueue(req.id)
+                        
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("auto-trigger: failed for node %s: %s", source_node_id, exc)
 
 
 # ── Omni Flash r2v ────────────────────────────────────────────────────────
@@ -811,6 +956,15 @@ class WorkerController:
                                 node.data = node_data
                         s.add(node)
                 s.commit()
+                
+                # Automatic downstream triggering: after successful image generation,
+                # find downstream Video nodes and auto-trigger their generation.
+                if not err and node_id is not None and req_type in ("gen_image", "edit_image"):
+                    res = result if isinstance(result, dict) else {}
+                    media_ids = res.get("media_ids") or []
+                    primary_media_id = next((m for m in media_ids if m), None)
+                    if primary_media_id:
+                        _trigger_downstream_videos(node_id, primary_media_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception("worker exception on rid=%s", rid)
             try:

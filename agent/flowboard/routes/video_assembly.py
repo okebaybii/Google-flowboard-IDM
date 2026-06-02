@@ -83,17 +83,60 @@ class AssembleRequest(BaseModel):
     audio_media_id: Optional[str] = None
 
 
+from proglog import ProgressBarLogger
+import time
+
+class DBProgressBarLogger(ProgressBarLogger):
+    def __init__(self, node_id: int):
+        super().__init__()
+        self.node_id = node_id
+        self.last_progress = 0
+        self.last_update_time = 0.0
+
+    def bars_callback(self, bar, attr, value, old_value=None):
+        if attr == "index":
+            total = self.bars.get(bar, {}).get("total", 1) or 1
+            progress = int((value / total) * 100)
+            progress = max(0, min(100, progress))
+            
+            current_time = time.time()
+            if progress != self.last_progress and (
+                progress - self.last_progress >= 2 
+                or current_time - self.last_update_time >= 1.0 
+                or progress == 100
+            ):
+                self.last_progress = progress
+                self.last_update_time = current_time
+                self._update_progress_in_db(progress)
+
+    def _update_progress_in_db(self, progress: int):
+        from flowboard.db import get_session
+        from flowboard.db.models import Node
+        try:
+            with get_session() as session:
+                node = session.get(Node, self.node_id)
+                if node:
+                    node_data = dict(node.data)
+                    node_data["assemblyProgress"] = progress
+                    node.data = node_data
+                    session.add(node)
+                    session.commit()
+        except Exception:
+            pass
+
+
 def _run_moviepy_assembly(
     video_paths: List[str],
     narrations: List[str],
     audio_path: Optional[str],
-    output_path: str
+    output_path: str,
+    node_id: Optional[int] = None
 ) -> None:
     """Concatenate videos and overlay audio + dynamic TTS narration using MoviePy.
     
     This function executes in a separate thread to prevent blocking the async loop.
     """
-    from moviepy.editor import VideoFileClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip
+    from moviepy import VideoFileClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip
     from gtts import gTTS
     import os
 
@@ -119,7 +162,7 @@ def _run_moviepy_assembly(
                     
                     # Nạp audio thuyết minh và thiết lập bắt đầu khớp thời lượng phân cảnh
                     tts_clip = AudioFileClip(temp_tts_path)
-                    tts_clip = tts_clip.set_start(current_offset)
+                    tts_clip = tts_clip.with_start(current_offset)
                     tts_audio_clips.append(tts_clip)
                 except Exception as tts_err:
                     logger.error(f"Failed to generate TTS for scene {i}: {tts_err}")
@@ -155,13 +198,14 @@ def _run_moviepy_assembly(
             final_clip = final_clip.with_audio(final_audio)
             
         # 4. Write output file
+        logger_obj = DBProgressBarLogger(node_id) if node_id is not None else None
         final_clip.write_videofile(
             output_path,
             codec="libx264",
             audio_codec="aac",
             temp_audiofile="temp-audio.m4a",
             remove_temp=True,
-            logger=None
+            logger=logger_obj
         )
         
         # Close to free file handles
@@ -191,13 +235,12 @@ def _run_moviepy_assembly(
                 pass
 
 
-@router.post("/node/{node_id}/assemble")
-async def assemble_videos(node_id: int, req: AssembleRequest):
+async def _assemble_videos_impl(
+    node_id: int,
+    video_order: List[str],
+    audio_media_id: Optional[str]
+) -> dict:
     """Concatenate connected video nodes and overlay background audio."""
-    
-    video_order = req.video_order
-    audio_media_id = req.audio_media_id
-    
     try:
         with get_session() as session:
             # 1. Verify target Node exists
@@ -266,19 +309,23 @@ async def assemble_videos(node_id: int, req: AssembleRequest):
             MEDIA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
             output_path = MEDIA_CACHE_DIR / f"{output_media_id}.mp4"
             
-            # Update node status to "running"
+            # Update node status to "running" and initialize progress
             node.status = "running"
+            node_data = dict(node.data)
+            node_data["assemblyProgress"] = 0
+            node.data = node_data
             session.add(node)
             session.commit()
             session.refresh(node)
             
-        # 7. Run compilation in separate thread (passing aligned narrations)
+        # 7. Run compilation in separate thread (passing aligned narrations and node_id)
         await asyncio.to_thread(
             _run_moviepy_assembly,
             video_paths,
             narrations,
             audio_path,
-            str(output_path)
+            str(output_path),
+            node_id
         )
         
         with get_session() as session:
@@ -303,6 +350,7 @@ async def assemble_videos(node_id: int, req: AssembleRequest):
             node_data["aspectRatio"] = "16:9"  # Default aspect for compiled videos
             node_data["audioMediaId"] = audio_media_id
             node_data["videoOrder"] = video_order
+            node_data["assemblyProgress"] = 100
             
             node.data = node_data
             node.status = "done"
@@ -322,6 +370,9 @@ async def assemble_videos(node_id: int, req: AssembleRequest):
             node = s.get(Node, node_id)
             if node:
                 node.status = "error"
+                node_data = dict(node.data)
+                node_data["assemblyProgress"] = 0
+                node.data = node_data
                 s.add(node)
                 s.commit()
         raise he
@@ -332,9 +383,18 @@ async def assemble_videos(node_id: int, req: AssembleRequest):
             node = s.get(Node, node_id)
             if node:
                 node.status = "error"
+                node_data = dict(node.data)
+                node_data["assemblyProgress"] = 0
+                node.data = node_data
                 s.add(node)
                 s.commit()
         raise HTTPException(status_code=500, detail=f"Assembly failed: {str(e)}")
+
+
+@router.post("/node/{node_id}/assemble")
+async def assemble_videos(node_id: int, req: AssembleRequest):
+    """Concatenate connected video nodes and overlay background audio."""
+    return await _assemble_videos_impl(node_id, req.video_order, req.audio_media_id)
 
 
 class GenerateAllRequest(BaseModel):
@@ -477,6 +537,7 @@ async def run_batch_generation(
     batch_video_aspect_ratio: Optional[str] = None,
     batch_camera_mode: Optional[str] = None,
     retry_failed: bool = False,
+    auto_assemble: bool = False,
 ):
     logger.info(f"Starting batch generation for assembly node {assembly_node_id}")
     batch_video_aspect_ratio = batch_video_aspect_ratio or "VIDEO_ASPECT_RATIO_PORTRAIT"
@@ -745,6 +806,19 @@ async def run_batch_generation(
                     }
                     session.add(node)
                     session.commit()
+        
+        # Auto-assemble at the end of the batch if requested and all nodes succeeded
+        if auto_assemble and not failed_nodes:
+            logger.info(f"Auto-assembling videos for assembly node {assembly_node_id}")
+            with get_session() as session:
+                assembly_node = session.get(Node, assembly_node_id)
+                data = (assembly_node.data or {}) if assembly_node else {}
+                video_order = data.get("videoOrder") or []
+                audio_media_id = data.get("audioMediaId")
+            try:
+                await _assemble_videos_impl(assembly_node_id, video_order, audio_media_id)
+            except Exception as ae:
+                logger.error(f"Auto-assembly failed for node {assembly_node_id}: {ae}")
                     
     except Exception as e:
         logger.error(f"Error in batch generation: {e}", exc_info=True)
@@ -788,6 +862,7 @@ async def generate_all_nodes(
         req.batch_video_aspect_ratio,
         req.batch_camera_mode,
         req.retry_failed,
+        req.auto_assemble,
     )
     return {"ok": True, "message": "Batch generation started"}
 

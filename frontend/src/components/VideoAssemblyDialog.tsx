@@ -26,7 +26,13 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
   );
   const [uploadingAudio, setUploadingAudio] = useState(false);
   const [audioPlaying, setAudioPlaying] = useState(false);
-  const [assembling, setAssembling] = useState(false);
+  const isRunning = data.status === "running";
+  const [assembling, setAssembling] = useState(isRunning);
+
+  useEffect(() => {
+    setAssembling(data.status === "running");
+  }, [data.status]);
+
   const [error, setError] = useState<string | null>(null);
 
   // Trạng thái kéo thả
@@ -144,12 +150,14 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
   };
 
   useEffect(() => {
-    if (hasActiveClipRequests || Boolean(data.batchGenerating)) {
-      setBatchGenerating(true);
+    if (hasActiveClipRequests || Boolean(data.batchGenerating) || data.status === "running") {
+      if (Boolean(data.batchGenerating)) {
+        setBatchGenerating(true);
+      }
       startBoardPolling();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasActiveClipRequests, data.batchGenerating]);
+  }, [hasActiveClipRequests, data.batchGenerating, data.status]);
 
   const startBatchGenerate = async (shouldAutoAssemble = false) => {
     setAutoAssembleAfterBatch(shouldAutoAssemble);
@@ -505,6 +513,64 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
             esc
           </button>
         </div>
+
+        {/* Output Preview (if already compiled) */}
+        {data.status === "done" && data.mediaId && (
+          <div className="gen-dialog__field" style={{
+            background: "rgba(16, 185, 129, 0.08)",
+            border: "1px solid rgba(16, 185, 129, 0.2)",
+            borderRadius: 10,
+            padding: 14,
+            marginBottom: 16,
+            display: "flex",
+            flexDirection: "column",
+            gap: 10
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#10b981", display: "flex", alignItems: "center", gap: 6 }}>
+                <span>🎉</span> Phim đã ghép nối thành công!
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const safeTitle = (data.title || "video_assembly").replace(/[^A-Za-z0-9_-]+/g, "_");
+                  const a = document.createElement("a");
+                  a.href = mediaUrl(data.mediaId!);
+                  a.download = `${safeTitle}-${data.shortId}.mp4`;
+                  document.body.appendChild(a);
+                  a.click();
+                  a.remove();
+                }}
+                style={{
+                  background: "linear-gradient(135deg, #10b981 0%, #059669 100%)",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  fontSize: 11,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4
+                }}
+              >
+                Tải xuống 📥
+              </button>
+            </div>
+            <video
+              src={mediaUrl(data.mediaId)}
+              controls
+              style={{
+                width: "100%",
+                maxHeight: 240,
+                borderRadius: 8,
+                background: "#000",
+                boxShadow: "0 4px 12px rgba(0,0,0,0.3)"
+              }}
+            />
+          </div>
+        )}
 
         {/* Section 1: Clip Sequencer */}
         <div className="gen-dialog__field">
@@ -877,6 +943,40 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
           </div>
         )}
 
+        {/* Progress Display */}
+        {assembling && (
+          <div style={{
+            background: "rgba(124, 92, 255, 0.08)",
+            border: "1px solid rgba(124, 92, 255, 0.2)",
+            borderRadius: 8,
+            padding: 12,
+            marginBottom: 12,
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            boxShadow: "0 2px 10px rgba(124, 92, 255, 0.05)"
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12 }}>
+              <span style={{ fontWeight: 600, color: "var(--accent)", display: "flex", alignItems: "center", gap: 6 }}>
+                <span className="video-assembly__spinner" style={{ width: 12, height: 12, marginRight: 6 }} />
+                Đang tiến hành ghép nối video...
+              </span>
+              <span style={{ fontWeight: 700, color: "var(--accent)" }}>
+                {typeof data.assemblyProgress === "number" ? data.assemblyProgress : 0}%
+              </span>
+            </div>
+            <div style={{ background: "rgba(255, 255, 255, 0.06)", height: 6, borderRadius: 3, overflow: "hidden" }}>
+              <div style={{
+                width: `${typeof data.assemblyProgress === "number" ? data.assemblyProgress : 0}%`,
+                height: "100%",
+                background: "linear-gradient(90deg, #7c5cff 0%, #a05cff 100%)",
+                borderRadius: 3,
+                transition: "width 0.3s ease"
+              }} />
+            </div>
+          </div>
+        )}
+
         {/* Footer actions */}
         <div className="gen-dialog__footer" style={{ marginTop: 8 }}>
           <div style={{ flex: 1 }} />
@@ -913,7 +1013,7 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
                     marginRight: 8,
                   }}
                 />
-                Đang ghép nối...
+                Đang ghép nối ({typeof data.assemblyProgress === "number" ? data.assemblyProgress : 0}%)
               </>
             ) : (
               "Bắt đầu ghép nối 🎬"

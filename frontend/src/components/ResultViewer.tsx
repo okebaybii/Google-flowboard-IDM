@@ -109,6 +109,9 @@ export function ResultViewer() {
   //     or upload (no model). Render as plain text so the visual
   //     difference signals "estimate vs ground truth".
   const metadataModel: { label: string; isBadge: boolean } = (() => {
+    if (data?.type === "video_assembly") {
+      return { label: "Local Assembly (MoviePy)", isBadge: true };
+    }
     if (data?.type === "video") {
       if (data.videoQuality) {
         return {
@@ -276,7 +279,7 @@ export function ResultViewer() {
 
   if (rfId === null || !data) return null;
 
-  const isVideo = data.type === "video";
+  const isVideo = data.type === "video" || data.type === "video_assembly";
   const shortMediaId = currentMediaId ? `${currentMediaId.slice(0, 12)}…` : "pending";
 
   const cacheBust = cacheKey > 0 ? `?t=${cacheKey}` : "";
@@ -332,6 +335,18 @@ export function ResultViewer() {
   const llmBusy =
     data?.autoPromptStatus === "pending"
     || data?.aiBriefStatus === "pending";
+
+  function handleDownload() {
+    if (!currentMediaId || !data) return;
+    const safeTitle = (data.title || data.type).replace(/[^A-Za-z0-9_-]+/g, "_");
+    const ext = data.type === "video" || data.type === "video_assembly" ? "mp4" : "png";
+    const a = document.createElement("a");
+    a.href = mediaUrl(currentMediaId);
+    a.download = `${safeTitle}-${data.shortId}.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
 
   function handleRegenerate() {
     if (!rfId || !data || llmBusy) return;
@@ -672,26 +687,38 @@ export function ResultViewer() {
                   : "Analyzing image — actions disabled until done"}
               </div>
             )}
-            <button
-              className="result-viewer__btn result-viewer__btn--primary"
-              onClick={handleRegenerate}
-              disabled={llmBusy}
-              title={llmBusy ? "Backend is busy on this node — try again in a moment" : undefined}
-            >
-              Regenerate ⌘R
-            </button>
-            <button
-              className="result-viewer__btn"
-              onClick={handleNewVariant}
-              disabled={llmBusy}
-              title={
-                llmBusy
-                  ? "Backend is busy on this node — try again in a moment"
-                  : "Clone this node onto the canvas with the same upstream refs"
-              }
-            >
-              New variant +
-            </button>
+            {data.type === "video_assembly" ? (
+              <button
+                className="result-viewer__btn result-viewer__btn--primary"
+                onClick={handleDownload}
+                disabled={!currentMediaId}
+              >
+                Tải xuống Video 📥
+              </button>
+            ) : (
+              <>
+                <button
+                  className="result-viewer__btn result-viewer__btn--primary"
+                  onClick={handleRegenerate}
+                  disabled={llmBusy}
+                  title={llmBusy ? "Backend is busy on this node — try again in a moment" : undefined}
+                >
+                  Regenerate ⌘R
+                </button>
+                <button
+                  className="result-viewer__btn"
+                  onClick={handleNewVariant}
+                  disabled={llmBusy}
+                  title={
+                    llmBusy
+                      ? "Backend is busy on this node — try again in a moment"
+                      : "Clone this node onto the canvas with the same upstream refs"
+                  }
+                >
+                  New variant +
+                </button>
+              </>
+            )}
             <button
               className={
                 "result-viewer__btn result-viewer__btn--save"
@@ -707,19 +734,21 @@ export function ResultViewer() {
             >
               {savedFlash ? "★ Saved" : saving ? "…" : "★ Save to library"}
             </button>
-            {projectId ? (
-              <a
-                className="result-viewer__btn result-viewer__btn--link"
-                href={`https://labs.google/fx/tools/flow/project/${projectId}`}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Open in Flow ↗
-              </a>
-            ) : (
-              <button className="result-viewer__btn" disabled>
-                Open in Flow ↗
-              </button>
+            {data.type !== "video_assembly" && (
+              projectId ? (
+                <a
+                  className="result-viewer__btn result-viewer__btn--link"
+                  href={`https://labs.google/fx/tools/flow/project/${projectId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Open in Flow ↗
+                </a>
+              ) : (
+                <button className="result-viewer__btn" disabled>
+                  Open in Flow ↗
+                </button>
+              )
             )}
           </div>
         </div>

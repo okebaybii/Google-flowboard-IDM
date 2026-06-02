@@ -937,18 +937,19 @@ function VideoTile({
           }}
         />
       ) : !givenUp ? (
-        // Fallback: no upstream poster available (orphan video node).
-        // Mount the <video> directly with `preload="none"` so the
-        // browser shows the bare frame instead of decoding frame 0.
+        // Fallback: no upstream poster available (orphan video node / assembly node).
+        // Mount the <video> directly with `preload="metadata"` so the
+        // browser decodes and displays the first frame as the thumbnail.
         <video
           key={attempt}
           className="node-card__thumbnail"
           data-kind="video"
           src={src}
-          preload="none"
+          preload="metadata"
           muted
           aria-label={alt}
           style={loaded ? undefined : { display: "none" }}
+          onLoadedMetadata={() => setLoaded(true)}
           onLoadedData={() => setLoaded(true)}
           onError={() => {
             retryTimerRef.current = setTimeout(() => {
@@ -957,7 +958,7 @@ function VideoTile({
           }}
         />
       ) : null}
-      {posterMediaId && (
+      {(posterMediaId || mediaId) && (
         <span className="video-tile__play-badge" aria-hidden="true">▶</span>
       )}
     </div>
@@ -1594,11 +1595,63 @@ function VideoAssemblyBody({ rfId, data }: { rfId: string; data: FlowboardNodeDa
     setEditorOpen(true);
   };
 
+  const isRunning = data.status === "running";
+  const progress = typeof data.assemblyProgress === "number" ? data.assemblyProgress : 0;
+
   return (
     <div className="node-body node-body--video-assembly" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {/* Visual Preview */}
       <div className="video-assembly__preview" style={{ position: "relative", minHeight: 120, background: "var(--panel-high)", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
-        {mediaId ? (
+        {isRunning ? (
+          <div className="video-assembly__compiling" style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            width: "100%",
+            height: "100%",
+            padding: 16,
+            boxSizing: "border-box",
+            background: "rgba(10, 10, 15, 0.8)",
+            backdropFilter: "blur(4px)",
+            color: "#fff"
+          }}>
+            <div className="video-assembly__spinner" style={{
+              width: 24,
+              height: 24,
+              border: "3px solid rgba(124, 92, 255, 0.2)",
+              borderBottomColor: "var(--accent)",
+              borderRadius: "50%",
+              animation: "video-assembly-spin 1s linear infinite",
+              marginBottom: 10
+            }} />
+            <style>{`
+              @keyframes video-assembly-spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+              }
+            `}</style>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--accent)", marginBottom: 4 }}>
+              Đang ghép nối... {progress}%
+            </span>
+            <div style={{
+              width: "85%",
+              height: 6,
+              background: "rgba(255, 255, 255, 0.1)",
+              borderRadius: 3,
+              overflow: "hidden",
+              border: "1px solid rgba(255, 255, 255, 0.05)"
+            }}>
+              <div style={{
+                width: `${progress}%`,
+                height: "100%",
+                background: "linear-gradient(90deg, #7c5cff 0%, #a05cff 100%)",
+                borderRadius: 3,
+                transition: "width 0.3s ease"
+              }} />
+            </div>
+          </div>
+        ) : mediaId ? (
           <VideoTile
             mediaId={mediaId}
             isProcessing={false}
@@ -1833,7 +1886,7 @@ function StoryScriptBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
 }
 
 function downloadExt(type: string): string {
-  if (type === "video") return "mp4";
+  if (type === "video" || type === "video_assembly") return "mp4";
   return "png";
 }
 
