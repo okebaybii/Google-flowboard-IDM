@@ -9,7 +9,7 @@ import firebase_admin
 from firebase_admin import auth as firebase_auth
 
 from flowboard.db import get_session
-from flowboard.db.models import UserSession
+from flowboard.db.models import UserSession, UserAccount
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,27 @@ def register_session(req: RegisterSessionRequest) -> dict:
     email = user_info.get("email", "")
     
     with get_session() as session:
+        # 1. Manage user account registration & activation status
+        user_acc = session.get(UserAccount, uid)
+        if not user_acc:
+            # Check if this is the first user in the database
+            first_user = session.exec(select(UserAccount)).first() is None
+            user_acc = UserAccount(
+                firebase_uid=uid,
+                email=email,
+                is_approved=True if first_user else False,  # First user is auto-approved as Admin
+                is_admin=True if first_user else False
+            )
+            session.add(user_acc)
+            session.commit()
+            session.refresh(user_acc)
+            logger.info(f"Registered new UserAccount {email} (is_approved: {user_acc.is_approved}, is_admin: {user_acc.is_admin})")
+            
+        if not user_acc.is_approved:
+            logger.warning(f"Login blocked: User {email} ({uid}) is not approved yet.")
+            raise HTTPException(status_code=403, detail="account_not_approved")
+            
+        # 2. Manage session concurrency
         user_sess = session.get(UserSession, uid)
         if not user_sess:
             user_sess = UserSession(
@@ -70,7 +91,13 @@ def register_session(req: RegisterSessionRequest) -> dict:
         session.commit()
         
     logger.info(f"Registered new active session {req.session_id} for user {email} ({uid})")
-    return {"ok": True, "uid": uid, "email": email}
+    return {
+        "ok": True, 
+        "uid": uid, 
+        "email": email, 
+        "is_admin": user_acc.is_admin, 
+        "is_approved": user_acc.is_approved
+    }
 
 
 @router.get("/heartbeat")
@@ -78,7 +105,7 @@ def heartbeat(
     x_session_id: str = Header(..., alias="X-Session-ID"),
     authorization: str = Header(...)
 ) -> dict:
-    """Verify that the browser session is still the active one (has not been overtaken)."""
+    """Verify that the browser session is still active and account is approved."""
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="invalid_auth_header")
     id_token = authorization.split(" ")[1]
@@ -87,6 +114,11 @@ def heartbeat(
     uid = user_info["uid"]
     
     with get_session() as session:
+        # Check approval status
+        user_acc = session.get(UserAccount, uid)
+        if not user_acc or not user_acc.is_approved:
+            raise HTTPException(status_code=403, detail="account_not_approved")
+
         user_sess = session.get(UserSession, uid)
         if not user_sess or user_sess.active_session_id != x_session_id:
             logger.warning(f"Session conflict detected for user {uid}. DB session: {user_sess.active_session_id if user_sess else 'None'}, Request session: {x_session_id}")
@@ -105,7 +137,7 @@ async def check_active_session_globally(
     x_session_id: Optional[str] = Header(None, alias="X-Session-ID"),
     authorization: Optional[str] = Header(None)
 ):
-    """Global dependency to check active session ID for all API endpoints."""
+    """Global dependency to check active session ID and admin approval for all API endpoints."""
     path = request.url.path
     # Skip non-API endpoints, health checks, and session registration
     if not path.startswith("/api") or path in (
@@ -126,7 +158,73 @@ async def check_active_session_globally(
     uid = user_info["uid"]
 
     with get_session() as session:
+        # Verify approval status
+        user_acc = session.get(UserAccount, uid)
+        if not user_acc or not user_acc.is_approved:
+            raise HTTPException(status_code=403, detail="account_not_approved")
+
         user_sess = session.get(UserSession, uid)
         if not user_sess or user_sess.active_session_id != x_session_id:
             logger.warning(f"Session conflict blocked request to {path} for user {uid}.")
             raise HTTPException(status_code=401, detail="session_conflict")
+
+
+# ============================================================================
+# ADMIN ENDPOINTS FOR USER ACCOUNT PROVISIONING
+# ============================================================================
+
+def verify_admin_user(authorization: str = Header(...)) -> UserAccount:
+    """Helper dependency to verify that the requesting user is an active admin."""
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="invalid_auth_header")
+    id_token = authorization.split(" ")[1]
+    user_info = verify_firebase_token(id_token)
+    uid = user_info["uid"]
+    
+    with get_session() as session:
+        user_acc = session.get(UserAccount, uid)
+        if not user_acc or not user_acc.is_approved:
+            raise HTTPException(status_code=403, detail="account_not_approved")
+        if not user_acc.is_admin:
+            raise HTTPException(status_code=403, detail="admin_only")
+        return user_acc
+
+
+@router.get("/admin/users")
+def get_all_users(admin: UserAccount = Depends(verify_admin_user)):
+    """Fetch all registered user accounts for the admin dashboard."""
+    with get_session() as session:
+        users = session.exec(select(UserAccount).order_by(UserAccount.created_at.desc())).all()
+        return [
+            {
+                "firebase_uid": u.firebase_uid,
+                "email": u.email,
+                "is_approved": u.is_approved,
+                "is_admin": u.is_admin,
+                "created_at": u.created_at.isoformat() if u.created_at else None
+            }
+            for u in users
+        ]
+
+
+class ApproveUserRequest(BaseModel):
+    target_uid: str
+    approve: bool
+
+
+@router.post("/admin/approve")
+def approve_user(req: ApproveUserRequest, admin: UserAccount = Depends(verify_admin_user)):
+    """Approve/activate or suspend a user account."""
+    if req.target_uid == admin.firebase_uid:
+        raise HTTPException(status_code=400, detail="cannot_modify_self")
+        
+    with get_session() as session:
+        user = session.get(UserAccount, req.target_uid)
+        if not user:
+            raise HTTPException(status_code=404, detail="user_not_found")
+        user.is_approved = req.approve
+        session.add(user)
+        session.commit()
+        logger.info(f"Admin {admin.email} set user {user.email} is_approved={req.approve}")
+        
+    return {"ok": True}

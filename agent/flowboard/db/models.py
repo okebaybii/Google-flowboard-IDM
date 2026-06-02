@@ -278,3 +278,12 @@ class UserSession(SQLModel, table=True):
     firebase_uid: str = Field(primary_key=True)
     active_session_id: str
     last_active_at: datetime = Field(default_factory=_utcnow)
+
+
+class UserAccount(SQLModel, table=True):
+    """Tracks registered user accounts and their activation/approval status."""
+    firebase_uid: str = Field(primary_key=True)
+    email: str
+    is_approved: bool = Field(default=False)
+    is_admin: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=_utcnow)
