@@ -591,14 +591,14 @@ def _select_node_media_id(node: Node, edge: Optional[Edge] = None) -> Optional[s
 
 def _collect_reference_media_ids(
     node_id: int,
-    node_map: dict[int, Node],
+    session,
     incoming_edges: dict[int, list[Edge]],
     allowed_types: set[str],
 ) -> list[str]:
     refs: list[str] = []
     seen: set[str] = set()
     for edge in incoming_edges.get(node_id, []):
-        src = node_map.get(edge.source_id)
+        src = session.get(Node, edge.source_id)
         if not src or src.type not in allowed_types:
             continue
         media_id = _select_node_media_id(src, edge)
@@ -668,59 +668,59 @@ async def run_batch_generation(
             all_nodes = session.exec(select(Node).where(Node.board_id == board_id)).all()
             all_edges = session.exec(select(Edge).where(Edge.board_id == board_id)).all()
             
-        node_map = {n.id: n for n in all_nodes}
-        
-        # Adjacency: target -> list of incoming edges. Keep the full Edge
-        # object so per-edge variant pins are available when selecting media.
-        incoming = defaultdict(list)
-        for e in all_edges:
-            incoming[e.target_id].append(e)
+            node_map = {n.id: n for n in all_nodes}
             
-        # BFS to find all upstream nodes recursively
-        visited = set()
-        queue = [assembly_node_id]
-        while queue:
-            curr = queue.pop(0)
-            for edge in incoming[curr]:
-                src_id = edge.source_id
-                if src_id not in visited:
-                    visited.add(src_id)
-                    queue.append(src_id)
-                    
-        upstream_nodes = [node_map[nid] for nid in visited if nid in node_map]
-        
-        # Filter nodes that need generation
-        gen_nodes = [n for n in upstream_nodes if n.type in ("image", "video", "Storyboard")]
-        
-        # Topological sort
-        in_count = {n.id: 0 for n in gen_nodes}
-        for e in all_edges:
-            if e.source_id in in_count and e.target_id in in_count:
-                in_count[e.target_id] += 1
+            # Adjacency: target -> list of incoming edges. Keep the full Edge
+            # object so per-edge variant pins are available when selecting media.
+            incoming = defaultdict(list)
+            for e in all_edges:
+                incoming[e.target_id].append(e)
                 
-        ready = [nid for nid, c in in_count.items() if c == 0]
-        order = []
-        seen = set()
-        
-        forward = defaultdict(list)
-        for e in all_edges:
-            if e.source_id in in_count and e.target_id in in_count:
-                forward[e.source_id].append(e.target_id)
-                
-        while ready:
-            nid = ready.pop(0)
-            if nid in seen:
-                continue
-            seen.add(nid)
-            order.append(nid)
-            for child in forward[nid]:
-                in_count[child] -= 1
-                if in_count[child] <= 0:
-                    ready.append(child)
+            # BFS to find all upstream nodes recursively
+            visited = set()
+            queue = [assembly_node_id]
+            while queue:
+                curr = queue.pop(0)
+                for edge in incoming[curr]:
+                    src_id = edge.source_id
+                    if src_id not in visited:
+                        visited.add(src_id)
+                        queue.append(src_id)
+                        
+            upstream_nodes = [node_map[nid] for nid in visited if nid in node_map]
+            
+            # Filter nodes that need generation
+            gen_nodes = [n for n in upstream_nodes if n.type in ("image", "video", "Storyboard")]
+            
+            # Topological sort
+            in_count = {n.id: 0 for n in gen_nodes}
+            for e in all_edges:
+                if e.source_id in in_count and e.target_id in in_count:
+                    in_count[e.target_id] += 1
                     
-        for n in gen_nodes:
-            if n.id not in seen:
-                order.append(n.id)
+            ready = [nid for nid, c in in_count.items() if c == 0]
+            order = []
+            seen = set()
+            
+            forward = defaultdict(list)
+            for e in all_edges:
+                if e.source_id in in_count and e.target_id in in_count:
+                    forward[e.source_id].append(e.target_id)
+                    
+            while ready:
+                nid = ready.pop(0)
+                if nid in seen:
+                    continue
+                seen.add(nid)
+                order.append(nid)
+                for child in forward[nid]:
+                    in_count[child] -= 1
+                    if in_count[child] <= 0:
+                        ready.append(child)
+                        
+            for n in gen_nodes:
+                if n.id not in seen:
+                    order.append(n.id)
                 
         logger.info(f"Topological order for batch: {order}")
         
@@ -803,7 +803,7 @@ async def run_batch_generation(
                     if node.type in ("image", "Storyboard"):
                         upstream_refs = _collect_reference_media_ids(
                             nid,
-                            node_map,
+                            session,
                             incoming,
                             ref_source_types,
                         )
@@ -843,7 +843,7 @@ async def run_batch_generation(
                         if is_omni:
                             ref_media_ids = _collect_reference_media_ids(
                                 nid,
-                                node_map,
+                                session,
                                 incoming,
                                 ref_source_types,
                             )
@@ -867,7 +867,7 @@ async def run_batch_generation(
                             start_media_ids = []
                             seen_start_ids = set()
                             for edge in parent_edges:
-                                p_node = node_map.get(edge.source_id)
+                                p_node = session.get(Node, edge.source_id)
                                 if p_node and p_node.type in ("image", "Storyboard"):
                                     mid = _select_node_media_id(p_node, edge)
                                     if mid and mid not in seen_start_ids:
