@@ -125,6 +125,60 @@ class DBProgressBarLogger(ProgressBarLogger):
             pass
 
 
+def detect_audio_beats(audio_path: str, video_duration: float) -> list[float]:
+    """Detect beat times in an audio file using amplitude envelope analysis."""
+    from moviepy import AudioFileClip
+    import numpy as np
+
+    try:
+        audio = AudioFileClip(audio_path)
+        # Read sound array at 100 samples per second (10ms bins)
+        fps = 100
+        sound_array = audio.to_soundarray(fps=fps)
+        audio.close()
+
+        if sound_array.size == 0:
+            return []
+
+        # Convert to mono by averaging channels
+        if len(sound_array.shape) > 1:
+            mono = np.mean(np.abs(sound_array), axis=1)
+        else:
+            mono = np.abs(sound_array)
+
+        # Compute energy envelope with a rolling window (0.1s = 10 samples)
+        window_size = 10
+        envelope = np.convolve(mono, np.ones(window_size)/window_size, mode='same')
+
+        # Detect local peaks (onsets) that are higher than the local average
+        beats = []
+        threshold_ratio = 1.3
+        min_beat_distance_s = 0.4  # Minimum distance between beats (max 150 BPM)
+        min_beat_distance_samples = int(min_beat_distance_s * fps)
+
+        last_beat_idx = -min_beat_distance_samples
+
+        for i in range(10, len(envelope) - 10):
+            local_avg = np.mean(envelope[max(0, i-50):min(len(envelope), i+50)])
+            if local_avg == 0:
+                local_avg = 1e-5
+
+            if (envelope[i] > envelope[i-1] and envelope[i] > envelope[i+1]
+                and envelope[i] > local_avg * threshold_ratio
+                and i - last_beat_idx >= min_beat_distance_samples):
+
+                beat_time = i / fps
+                if beat_time < video_duration:
+                    beats.append(beat_time)
+                    last_beat_idx = i
+
+        logger.info(f"Beat-matching: detected {len(beats)} beats in background music.")
+        return beats
+    except Exception as e:
+        logger.warning(f"Failed to detect audio beats: {e}")
+        return []
+
+
 def _run_moviepy_assembly(
     video_paths: List[str],
     narrations: List[str],
@@ -144,10 +198,30 @@ def _run_moviepy_assembly(
     tts_audio_clips = []
     temp_files = []
     try:
-        # 1. Load video clips and generate aligned TTS narration audio
-        current_offset = 0.0
-        for i, path in enumerate(video_paths):
-            clip = VideoFileClip(path)
+        # Load raw clips
+        raw_clips = []
+        for path in video_paths:
+            raw_clips.append(VideoFileClip(path))
+
+        # 1. Detect audio beats if bg music exists
+        total_raw_duration = sum(c.duration for c in raw_clips)
+        beats = detect_audio_beats(audio_path, total_raw_duration) if audio_path else []
+
+        # 2. Load video clips, align durations to beats, and generate aligned TTS narration audio
+        cumulative_time = 0.0
+        for i, clip in enumerate(raw_clips):
+            natural_duration = clip.duration
+            target_end_time = cumulative_time + natural_duration
+            
+            # Align end of clip to closest music beat (except the last clip)
+            if i < len(raw_clips) - 1 and beats:
+                closest_beat = min(beats, key=lambda b: abs(b - target_end_time))
+                if abs(closest_beat - target_end_time) <= 1.0:
+                    new_duration = closest_beat - cumulative_time
+                    if new_duration > 0.5:
+                        clip = clip.subclipped(0, new_duration)
+                        logger.info(f"Beat-matching: aligned scene {i+1} duration from {natural_duration:.2f}s to {new_duration:.2f}s (beat at {closest_beat:.2f}s)")
+            
             clips.append(clip)
             
             # Kiểm tra nếu phân cảnh này có lời thoại thuyết minh
@@ -162,19 +236,28 @@ def _run_moviepy_assembly(
                     
                     # Nạp audio thuyết minh và thiết lập bắt đầu khớp thời lượng phân cảnh
                     tts_clip = AudioFileClip(temp_tts_path)
-                    tts_clip = tts_clip.with_start(current_offset)
+                    tts_clip = tts_clip.with_start(cumulative_time)
                     tts_audio_clips.append(tts_clip)
                 except Exception as tts_err:
                     logger.error(f"Failed to generate TTS for scene {i}: {tts_err}")
                     
-            # Tăng mốc offset thời gian để khớp phân cảnh tiếp theo
-            current_offset += clip.duration
+            # Tăng mốc offset thời gian dựa trên thời lượng thực tế của clip đã căn chỉnh
+            cumulative_time += clip.duration
         
-        # 2. Concatenate video clips
-        final_clip = concatenate_videoclips(clips, method="compose")
+        # 3. Concatenate video clips with a beautiful 0.4s crossfade transition
+        use_crossfade = len(clips) > 1 and all(c.duration > 0.8 for c in clips)
+        if use_crossfade:
+            fade_clips = []
+            for idx, c in enumerate(clips):
+                if idx > 0:
+                    c = c.crossfadein(0.4)
+                fade_clips.append(c)
+            final_clip = concatenate_videoclips(fade_clips, method="compose", padding=-0.4)
+        else:
+            final_clip = concatenate_videoclips(clips, method="compose")
         video_duration = final_clip.duration
         
-        # 3. Mix audio components (Background Music at 20% volume + TTS Voiceover)
+        # 4. Mix audio components (Background Music at 20% volume + TTS Voiceover)
         audio_components = []
         
         # Thêm nhạc nền nếu có (giảm âm lượng xuống 20% để giọng thoại rõ ràng)
@@ -197,7 +280,7 @@ def _run_moviepy_assembly(
             final_audio = CompositeAudioClip(audio_components)
             final_clip = final_clip.with_audio(final_audio)
             
-        # 4. Write output file
+        # 5. Write output file
         logger_obj = DBProgressBarLogger(node_id) if node_id is not None else None
         final_clip.write_videofile(
             output_path,
@@ -268,6 +351,17 @@ async def _assemble_videos_impl(
             video_nodes = [n for n in upstream_nodes if n.type == "video"]
             if not video_nodes:
                 raise HTTPException(status_code=400, detail="No connected 'video' nodes found.")
+                
+            # Determine aspect ratio from first video node dynamically
+            resolved_aspect_ratio = "16:9"
+            if video_nodes:
+                raw_aspect = video_nodes[0].data.get("aspectRatio") or "16:9"
+                if "PORTRAIT" in raw_aspect:
+                    resolved_aspect_ratio = "9:16"
+                elif "LANDSCAPE" in raw_aspect:
+                    resolved_aspect_ratio = "16:9"
+                else:
+                    resolved_aspect_ratio = raw_aspect
                 
             # 3. Sort nodes
             # Sort by their position in video_order, or layout x coordinate if not in order array
@@ -347,7 +441,7 @@ async def _assemble_videos_impl(
             node_data["mediaId"] = output_media_id
             node_data["mediaIds"] = [output_media_id]
             node_data["variantCount"] = 1
-            node_data["aspectRatio"] = "16:9"  # Default aspect for compiled videos
+            node_data["aspectRatio"] = resolved_aspect_ratio
             node_data["audioMediaId"] = audio_media_id
             node_data["videoOrder"] = video_order
             node_data["assemblyProgress"] = 100
@@ -508,6 +602,14 @@ def _batch_camera_suffix(camera_mode: Optional[str]) -> str:
         return " Camera: cinematic controlled movement with smooth dolly, pan, or parallax; avoid chaotic handheld shake."
     if camera_mode == "dynamic":
         return " Camera: subtle smooth movement, gentle pan or slow dolly/zoom only; keep subject readable and stable."
+    if camera_mode == "pan_right":
+        return " Camera: pan right, smooth panning camera action to the right, showing rightside background details, cinematic."
+    if camera_mode == "pan_left":
+        return " Camera: pan left, smooth panning camera action to the left, showing leftside background details, cinematic."
+    if camera_mode == "zoom_in":
+        return " Camera: push in, smooth camera zoom-in toward the subject, dramatic focus, high cinematic quality."
+    if camera_mode == "zoom_out":
+        return " Camera: pull out, smooth camera zoom-out/dolly-back showing wider scope/background, cinematic."
     return ""
 
 
@@ -678,10 +780,20 @@ async def run_batch_generation(
                         ref_source_types,
                     )
 
+                    # Map batch_video_aspect_ratio to corresponding image aspect_ratio
+                    img_aspect = node.data.get("aspectRatio")
+                    if batch_video_aspect_ratio:
+                        if batch_video_aspect_ratio == "VIDEO_ASPECT_RATIO_PORTRAIT":
+                            img_aspect = "IMAGE_ASPECT_RATIO_PORTRAIT"
+                        elif batch_video_aspect_ratio == "VIDEO_ASPECT_RATIO_LANDSCAPE":
+                            img_aspect = "IMAGE_ASPECT_RATIO_LANDSCAPE"
+                    if not img_aspect:
+                        img_aspect = "IMAGE_ASPECT_RATIO_LANDSCAPE"
+
                     params = {
                         "prompt": final_prompt,
                         "project_id": project_id,
-                        "aspect_ratio": node.data.get("aspectRatio") or "IMAGE_ASPECT_RATIO_LANDSCAPE",
+                        "aspect_ratio": img_aspect,
                         "paygate_tier": paygate_tier,
                         "variant_count": node.data.get("variantCount") or 1,
                         "image_model": node.data.get("imageModel") or image_model or "NANO_BANANA_2",
@@ -695,6 +807,11 @@ async def run_batch_generation(
                 else:  # video
                     video_model_value = node.data.get("videoModel") or node.data.get("model") or video_model or "veo"
                     is_omni = video_model_value == "omni_flash"
+                    
+                    vid_aspect = node.data.get("aspectRatio") or batch_video_aspect_ratio
+                    if batch_video_aspect_ratio:
+                        vid_aspect = batch_video_aspect_ratio
+
                     if is_omni:
                         ref_media_ids = _collect_reference_media_ids(
                             nid,
@@ -714,7 +831,7 @@ async def run_batch_generation(
                             "project_id": project_id,
                             "ref_media_ids": ref_media_ids,
                             "duration_s": node.data.get("durationS") or node.data.get("omniFlashDuration") or omni_flash_duration or 4,
-                            "aspect_ratio": node.data.get("aspectRatio") or batch_video_aspect_ratio,
+                            "aspect_ratio": vid_aspect,
                             "paygate_tier": paygate_tier,
                         }
                         req_type = "gen_video_omni"
@@ -743,7 +860,7 @@ async def run_batch_generation(
                         params = {
                             "prompt": f"{final_prompt}{_batch_camera_suffix(batch_camera_mode)}",
                             "project_id": project_id,
-                            "aspect_ratio": node.data.get("aspectRatio") or batch_video_aspect_ratio,
+                            "aspect_ratio": vid_aspect,
                             "paygate_tier": paygate_tier,
                             "video_quality": node.data.get("videoQuality") or video_quality or "fast",
                         }
@@ -754,6 +871,12 @@ async def run_batch_generation(
                         req_type = "gen_video"
                     
                 node.status = "queued"
+                node_data = dict(node.data)
+                if node.type in ("image", "Storyboard"):
+                    node_data["aspectRatio"] = img_aspect
+                else:
+                    node_data["aspectRatio"] = vid_aspect
+                node.data = node_data
                 session.add(node)
                 session.commit()
                 

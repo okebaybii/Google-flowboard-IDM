@@ -46,15 +46,29 @@ export function Toaster() {
 
   if (!error) return null;
 
+  const isSuccess = error.startsWith("🎉");
+  const displayMsg = isSuccess ? error.replace(/^🎉\s*/, "") : error;
+
   return (
-    <div className="toaster" role="alert" aria-live="assertive">
+    <div
+      className="toaster"
+      role="alert"
+      aria-live="assertive"
+      style={isSuccess ? { borderLeft: "2px solid #10b981" } : undefined}
+    >
       <div className="toaster__body">
-        <span className="toaster__icon" aria-hidden="true">!</span>
-        <span className="toaster__msg">{error}</span>
+        <span
+          className="toaster__icon"
+          aria-hidden="true"
+          style={isSuccess ? { color: "#10b981" } : undefined}
+        >
+          {isSuccess ? "🎉" : "!"}
+        </span>
+        <span className="toaster__msg">{displayMsg}</span>
         <button
           className="toaster__close"
           onClick={clearError}
-          aria-label="Dismiss error"
+          aria-label="Dismiss message"
         >
           ×
         </button>

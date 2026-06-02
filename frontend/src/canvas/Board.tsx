@@ -132,6 +132,34 @@ export function Board() {
     didConnect: false,
   });
 
+  // Toast notification for successful video assembly completion
+  const prevStatusesRef = useRef<Record<string, string>>({});
+  useEffect(() => {
+    const nextStatuses: Record<string, string> = {};
+    let triggered = false;
+
+    for (const node of nodes) {
+      if (node.type === "video_assembly") {
+        const id = node.id;
+        const status = node.data.status || "idle";
+        nextStatuses[id] = status;
+
+        const prevStatus = prevStatusesRef.current[id];
+        if (prevStatus === "running" && status === "done") {
+          triggered = true;
+        }
+      }
+    }
+
+    prevStatusesRef.current = nextStatuses;
+
+    if (triggered) {
+      useBoardStore.setState({
+        error: "🎉 Ghép nối phim thành công! Bạn có thể xem kết quả ngay."
+      });
+    }
+  }, [nodes]);
+
   // Reference-panel drop handler — fires when the user drags a saved
   // reference card from the right-side library onto the canvas. We
   // detect the custom MIME we set in ReferencesPanel and spawn a new

@@ -830,7 +830,9 @@ function VideoTile({
 }) {
   const [attempt, setAttempt] = useState(0);
   const [loaded, setLoaded] = useState(false);
+  const [hovered, setHovered] = useState(false);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
     setLoaded(false);
@@ -842,6 +844,17 @@ function VideoTile({
       }
     };
   }, [mediaId]);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      if (hovered) {
+        videoRef.current.play().catch(() => {});
+      } else {
+        videoRef.current.pause();
+        videoRef.current.currentTime = 0;
+      }
+    }
+  }, [hovered]);
 
   const blockedTitle = slotError
     ? `Variant blocked: ${slotError} — click for details`
@@ -900,6 +913,9 @@ function VideoTile({
     `video-tile video-tile--filled` +
     (onClick ? " video-tile--clickable" : "");
 
+  const showVideo = !posterMediaId || hovered;
+  const showPoster = posterMediaId && !hovered;
+
   return (
     <div
       className={cls}
@@ -914,41 +930,27 @@ function VideoTile({
           onClick();
         }
       }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
       {!loaded && placeholder}
-      {!givenUp && posterMediaId ? (
-        // Thumbnail = static poster image (the upstream i2v source).
-        // Mounting a <video> here decodes frame 0 in Chrome and
-        // overrides the poster attribute, which is what made every
-        // tile display the video's setup beat (often empty ceiling)
-        // instead of the subject-centered framing. The full video
-        // with controls plays in the ResultViewer modal — clicking
-        // a tile already routes there.
-        <img
-          key={`poster-${attempt}`}
-          className="video-tile__poster"
-          src={mediaUrl(posterMediaId)}
-          alt={alt}
-          onLoad={() => setLoaded(true)}
-          onError={() => {
-            retryTimerRef.current = setTimeout(() => {
-              setAttempt((a) => a + 1);
-            }, 2000);
-          }}
-        />
-      ) : !givenUp ? (
-        // Fallback: no upstream poster available (orphan video node / assembly node).
-        // Mount the <video> directly with `preload="metadata"` so the
-        // browser decodes and displays the first frame as the thumbnail.
+      {!givenUp && (
         <video
+          ref={videoRef}
           key={attempt}
           className="node-card__thumbnail"
           data-kind="video"
           src={src}
-          preload="metadata"
+          preload="auto"
           muted
-          aria-label={alt}
-          style={loaded ? undefined : { display: "none" }}
+          loop
+          playsInline
+          style={{
+            width: "100%",
+            height: "100%",
+            objectFit: "cover",
+            display: showVideo && loaded ? "block" : "none"
+          }}
           onLoadedMetadata={() => setLoaded(true)}
           onLoadedData={() => setLoaded(true)}
           onError={() => {
@@ -957,7 +959,27 @@ function VideoTile({
             }, 2000);
           }}
         />
-      ) : null}
+      )}
+      {!givenUp && posterMediaId && (
+        <img
+          key={`poster-${attempt}`}
+          className="video-tile__poster"
+          src={mediaUrl(posterMediaId)}
+          alt={alt}
+          style={{
+            width: "100%",
+            height: "100%",
+            objectFit: "cover",
+            display: showPoster && loaded ? "block" : "none"
+          }}
+          onLoad={() => setLoaded(true)}
+          onError={() => {
+            retryTimerRef.current = setTimeout(() => {
+              setAttempt((a) => a + 1);
+            }, 2000);
+          }}
+        />
+      )}
       {(posterMediaId || mediaId) && (
         <span className="video-tile__play-badge" aria-hidden="true">▶</span>
       )}

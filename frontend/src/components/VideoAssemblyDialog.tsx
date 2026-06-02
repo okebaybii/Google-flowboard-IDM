@@ -622,6 +622,10 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
                         ["dynamic", "Dynamic · động nhẹ"],
                         ["static", "Static · camera tĩnh"],
                         ["cinematic", "Cinematic · điện ảnh"],
+                        ["pan_right", "Pan Right · lia phải"],
+                        ["pan_left", "Pan Left · lia trái"],
+                        ["zoom_in", "Zoom In · phóng to"],
+                        ["zoom_out", "Zoom Out · thu nhỏ"],
                       ].map(([value, label]) => (
                         <button
                           key={value}
