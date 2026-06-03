@@ -2,7 +2,6 @@ import { useEffect, useRef } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { Board } from "./canvas/Board";
 import { AddNodePalette } from "./canvas/AddNodePalette";
-import { StatusBar } from "./components/StatusBar";
 import { Toolbar } from "./components/Toolbar";
 // import { ChatSidebar } from "./components/ChatSidebar";
 import { ProjectSidebar } from "./components/ProjectSidebar";
@@ -186,7 +185,6 @@ export function App() {
               <AddNodePalette />
             </>
           )}
-          <StatusBar />
           <ReferencesPanel />
         </div>
       </ReactFlowProvider>

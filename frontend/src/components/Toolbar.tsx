@@ -3,6 +3,7 @@ import { useBoardStore } from "../store/board";
 import { useAuthStore } from "../store/auth";
 import { ActivityBell } from "./activity/ActivityBell";
 import { AiProviderBadge } from "./AiProviderBadge";
+import { StatusBar } from "./StatusBar";
 
 export function Toolbar() {
   const boardName = useBoardStore((s) => s.boardName);
@@ -61,6 +62,7 @@ export function Toolbar() {
       )}
 
       <div className="toolbar-actions" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <StatusBar />
         <ActivityBell />
         <AiProviderBadge />
         {authUser && (
