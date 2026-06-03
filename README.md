@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="docs/assets/logo-wordmark.svg" alt="Flowboard" width="540" />
-</p>
+
 
 <p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"/></a>
