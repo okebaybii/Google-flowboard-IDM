@@ -53,3 +53,9 @@ firebase-service-account.json
 .env
 .env.development
 .env.production
+
+# Temporary media files
+agent/temp_tts_*.mp3
+temp_test_*.mp3
+*.mp3
+
