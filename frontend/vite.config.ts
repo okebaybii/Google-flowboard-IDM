@@ -12,6 +12,7 @@ export default defineConfig({
   server: {
     port: 1234,
     host: "0.0.0.0",
+    allowedHosts: ["flow.hieupro.io.vn"],
     proxy: {
       "/api": "http://localhost:8101",
       "/media": "http://localhost:8101",
