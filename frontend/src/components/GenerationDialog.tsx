@@ -317,7 +317,13 @@ export function GenerationDialog() {
   // multiple variants, we batch-i2v one video per variant — `sourceMediaIds`
   // captures the full set; `sourceMediaId` is the active variant for the
   // legacy single-source path.
-  const sourceEdge = isVideo ? edges.find((e) => e.target === rfId) : undefined;
+  const sourceEdge = isVideo
+    ? edges.find((e) => {
+        if (e.target !== rfId) return false;
+        const src = nodes.find((n) => n.id === e.source);
+        return src && REF_SOURCE_TYPES.has(src.data.type);
+      })
+    : undefined;
   const sourceNode = sourceEdge ? nodes.find((n) => n.id === sourceEdge.source) : undefined;
 
   // Storyboard → video: when ANY upstream node is a Storyboard composite,
@@ -481,11 +487,14 @@ export function GenerationDialog() {
       setPromptEdited(false);
       // Default-select every upstream source variant for video targets so
       // the user just hits Generate when they want all videos.
-      const upstreamEdge = useBoardStore
-        .getState()
-        .edges.find((e) => e.target === rfId);
+      const { nodes: boardNodes, edges: boardEdges } = useBoardStore.getState();
+      const upstreamEdge = boardEdges.find((e) => {
+        if (e.target !== rfId) return false;
+        const src = boardNodes.find((n) => n.id === e.source);
+        return src && REF_SOURCE_TYPES.has(src.data.type);
+      });
       const upstreamNode = upstreamEdge
-        ? useBoardStore.getState().nodes.find((n) => n.id === upstreamEdge.source)
+        ? boardNodes.find((n) => n.id === upstreamEdge.source)
         : undefined;
       const ups =
         upstreamNode?.data.mediaIds ??

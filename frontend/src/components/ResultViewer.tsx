@@ -366,7 +366,11 @@ export function ResultViewer() {
     // gen_image — silently produces a still image, overwriting the
     // actual video result on the node.
     if (data.type === "video") {
-      const upstreamEdge = edges.find((e) => e.target === rfId);
+      const upstreamEdge = edges.find((e) => {
+        if (e.target !== rfId) return false;
+        const src = nodes.find((n) => n.id === e.source);
+        return src && ["character", "image", "visual_asset", "Storyboard"].includes(src.data.type);
+      });
       const upstreamNode = upstreamEdge
         ? nodes.find((n) => n.id === upstreamEdge.source)
         : undefined;

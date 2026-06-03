@@ -1027,7 +1027,11 @@ function VideoBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
   // i2v: variant i of the video came from variant i of the upstream
   // image; single-source: every tile shares the same poster.
   const { nodes, edges } = useBoardStore.getState();
-  const upstreamEdge = edges.find((e) => e.target === rfId);
+  const upstreamEdge = edges.find((e) => {
+    if (e.target !== rfId) return false;
+    const src = nodes.find((n) => n.id === e.source);
+    return src && ["character", "image", "visual_asset", "Storyboard"].includes(src.data.type);
+  });
   const upstreamNode = upstreamEdge
     ? nodes.find((n) => n.id === upstreamEdge.source)
     : undefined;
