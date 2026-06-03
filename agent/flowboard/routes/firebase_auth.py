@@ -31,6 +31,8 @@ def verify_firebase_token(id_token: str) -> dict:
             
         decoded_token = firebase_auth.verify_id_token(id_token)
         return decoded_token
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to verify Firebase token: {e}")
         raise HTTPException(status_code=401, detail="invalid_token")

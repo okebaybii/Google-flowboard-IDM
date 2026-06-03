@@ -112,14 +112,22 @@ async def lifespan(app: FastAPI):
     # Initialize Firebase Admin SDK
     import os
     import firebase_admin
+    from pathlib import Path
     from firebase_admin import credentials
     
     cred_path = os.getenv("FIREBASE_SERVICE_ACCOUNT") or "firebase-service-account.json"
-    if os.path.exists(cred_path):
+    resolved_cred_path = Path(cred_path)
+    if not resolved_cred_path.exists():
+        # Fallback to checking relative to the agent folder parent
+        fallback_path = Path(__file__).resolve().parent.parent / cred_path
+        if fallback_path.exists():
+            resolved_cred_path = fallback_path
+            
+    if resolved_cred_path.exists():
         try:
-            cred = credentials.Certificate(cred_path)
+            cred = credentials.Certificate(str(resolved_cred_path))
             firebase_admin.initialize_app(cred)
-            logger.info("✅ Firebase Admin SDK initialized successfully.")
+            logger.info(f"✅ Firebase Admin SDK initialized successfully from {resolved_cred_path}.")
         except Exception as e:
             logger.error(f"❌ Failed to initialize Firebase Admin: {e}")
     else:
