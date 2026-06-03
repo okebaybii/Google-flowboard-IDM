@@ -47,6 +47,7 @@ interface AuthState {
   signInWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
   registerSessionOnBackend: (idToken: string) => Promise<any>;
+  getFreshToken: () => Promise<string | null>;
   triggerConflict: () => void;
   clearError: () => void;
 }
@@ -340,6 +341,21 @@ export const useAuthStore = create<AuthState>((set, get) => {
     },
 
     registerSessionOnBackend,
+    
+    getFreshToken: async () => {
+      const state = get();
+      if (hasRealFirebase && firebaseAuth && firebaseAuth.currentUser) {
+        try {
+          const freshToken = await firebaseAuth.currentUser.getIdToken();
+          set({ token: freshToken });
+          return freshToken;
+        } catch (err) {
+          console.error("Failed to refresh Firebase token:", err);
+          return state.token;
+        }
+      }
+      return state.token;
+    },
     
     triggerConflict: () => {
       set({ sessionConflict: true });

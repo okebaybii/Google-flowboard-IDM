@@ -1,7 +1,8 @@
 import { useAuthStore } from "../store/auth";
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const { token, sessionId } = useAuthStore.getState();
+  const { sessionId } = useAuthStore.getState();
+  const token = await useAuthStore.getState().getFreshToken();
   const authHeaders: Record<string, string> = {};
   if (token) {
     authHeaders["Authorization"] = `Bearer ${token}`;

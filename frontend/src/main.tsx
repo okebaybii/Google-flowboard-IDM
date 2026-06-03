@@ -19,7 +19,8 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 
   const isApi = url.startsWith("/api") || url.startsWith("api") || url.includes("/api/");
   if (isApi) {
-    const { token, sessionId } = useAuthStore.getState();
+    const { sessionId } = useAuthStore.getState();
+    const token = await useAuthStore.getState().getFreshToken();
     if (token || sessionId) {
       if (input instanceof Request) {
         if (token && !input.headers.has("Authorization")) {
