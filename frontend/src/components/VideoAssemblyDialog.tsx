@@ -51,9 +51,7 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
   const [batchVideoAspectRatio, setBatchVideoAspectRatio] = useState(
     data.batchVideoAspectRatio || "VIDEO_ASPECT_RATIO_PORTRAIT"
   );
-  const [batchCameraMode, setBatchCameraMode] = useState(
-    data.batchCameraMode || "dynamic"
-  );
+
   const [retryFailedClips, setRetryFailedClips] = useState(
     Boolean(data.retryFailedClips) || false
   );
@@ -191,7 +189,6 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
           omni_flash_duration: omniFlashDuration,
           auto_assemble: shouldAutoAssemble,
           batch_video_aspect_ratio: batchVideoAspectRatio,
-          batch_camera_mode: batchCameraMode,
           retry_failed: retryFailedClips,
         }),
       });
@@ -204,7 +201,6 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
         batchGenerating: true,
         autoAssembleAfterBatch: shouldAutoAssemble,
         batchVideoAspectRatio,
-        batchCameraMode,
         retryFailedClips,
       });
       if (!isNaN(dbId)) {
@@ -213,7 +209,6 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
             batchGenerating: true,
             autoAssembleAfterBatch: shouldAutoAssemble,
             batchVideoAspectRatio,
-            batchCameraMode,
             retryFailedClips,
           },
         });
@@ -631,29 +626,7 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
                       ))}
                     </div>
                   </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <span style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600 }}>Camera</span>
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                      {[
-                        ["dynamic", "Dynamic · động nhẹ"],
-                        ["static", "Static · camera tĩnh"],
-                        ["cinematic", "Cinematic · điện ảnh"],
-                        ["pan_right", "Pan Right · lia phải"],
-                        ["pan_left", "Pan Left · lia trái"],
-                        ["zoom_in", "Zoom In · phóng to"],
-                        ["zoom_out", "Zoom Out · thu nhỏ"],
-                      ].map(([value, label]) => (
-                        <button
-                          key={value}
-                          type="button"
-                          onClick={() => setBatchCameraMode(value)}
-                          className={`aspect-chip${batchCameraMode === value ? " aspect-chip--active" : ""}`}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+
                   {errorCount > 0 && (
                     <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--muted)" }}>
                       <input

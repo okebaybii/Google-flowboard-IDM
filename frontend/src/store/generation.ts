@@ -74,6 +74,8 @@ interface GenerationState {
       // we generate one video per variant. Backend sends N items in the
       // batchAsyncGenerate body so all are dispatched together.
       sourceMediaIds?: string[];
+      endMediaId?: string;
+      endMediaIds?: string[];
       variantCount?: number;
       // Per-variant prompts. When provided, each variant uses its own
       // prompt — required for batch auto-prompt to keep poses distinct
@@ -190,6 +192,8 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
     kind?: "image" | "video";
     sourceMediaId?: string;
     sourceMediaIds?: string[];
+    endMediaId?: string;
+    endMediaIds?: string[];
     variantCount?: number;
     prompts?: string[];
   }) {
@@ -327,6 +331,11 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
             videoParams.start_media_ids = opts.sourceMediaIds;
           } else {
             videoParams.start_media_id = opts.sourceMediaId;
+          }
+          if (Array.isArray(opts.endMediaIds) && opts.endMediaIds.length > 0) {
+            videoParams.end_media_ids = opts.endMediaIds;
+          } else if (opts.endMediaId) {
+            videoParams.end_media_id = opts.endMediaId;
           }
           reqDto = await createRequest({
             type: "gen_video",

@@ -439,6 +439,8 @@ class FlowSDK:
         scene_id: Optional[str] = None,
         start_media_ids: Optional[list[str]] = None,
         video_quality: Optional[str] = None,
+        end_media_id: Optional[str] = None,
+        end_media_ids: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """Kick off i2v operation(s). Returns ``{raw, operation_names}`` on
         success or ``{raw, error}`` on failure. Operations are async — the
@@ -485,11 +487,18 @@ class FlowSDK:
         if not sources:
             return {"raw": None, "error": "missing_start_media_id"}
 
+        # Normalize end media sources identically
+        end_sources: list[str] = []
+        if end_media_ids:
+            end_sources = [m for m in end_media_ids if isinstance(m, str) and m]
+        if not end_sources and isinstance(end_media_id, str) and end_media_id:
+            end_sources = [end_media_id]
+
         ts = int(time.time() * 1000)
         ctx = _client_context(project_id, paygate_tier)
         items: list[dict[str, Any]] = []
         for i, mid in enumerate(sources):
-            items.append({
+            item: dict[str, Any] = {
                 "aspectRatio": aspect_ratio,
                 # Distinct seed per item so Flow doesn't dedupe.
                 "seed": (ts + i * 9973) % 1_000_000,
@@ -497,7 +506,11 @@ class FlowSDK:
                 "videoModelKey": model_key,
                 "startImage": {"mediaId": mid},
                 "metadata": {"sceneId": scene_id or str(uuid.uuid4())},
-            })
+            }
+            if end_sources:
+                end_mid = end_sources[i] if i < len(end_sources) else end_sources[0]
+                item["endImage"] = {"mediaId": end_mid}
+            items.append(item)
         body = {
             "clientContext": ctx,
             "mediaGenerationContext": {"batchId": str(uuid.uuid4())},

@@ -1989,6 +1989,15 @@ export function NodeCard(props: NodeProps<FlowNode>) {
     >
       <StatusStrip status={data.status} />
       <Handle type="target" position={Position.Left} className="node-handle" />
+      {data.type === "video" && (
+        <Handle
+          type="target"
+          position={Position.Left}
+          id="end-image"
+          className="node-handle node-handle--end-image"
+          style={{ top: '70%' }}
+        />
+      )}
 
       <div className="node-header">
         <span className="node-icon" aria-hidden="true">{ICON[data.type] ?? "□"}</span>

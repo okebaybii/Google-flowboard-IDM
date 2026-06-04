@@ -417,22 +417,23 @@ async def run_pipeline(
                 params["ref_media_ids"] = ref_media_ids
             req_type = "gen_image"
         else:  # video
-            start_media_id = None
+            images_found = []
             for u in upstream_nodes:
                 if u.type in ("image", "Storyboard"):
                     mid = (u.data or {}).get("mediaId")
                     if isinstance(mid, str) and mid:
-                        start_media_id = mid
-                        break
-            if not start_media_id:
+                        images_found.append(mid)
+            if not images_found:
                 failed_nodes.add(nid)
                 _stamp_node_status(nid, "error", error="missing_upstream_image")
                 continue
-            params = {
+            params: dict[str, Any] = {
                 "prompt": prompt.strip(),
                 "project_id": project_id,
-                "start_media_id": start_media_id,
+                "start_media_id": images_found[0],
             }
+            if len(images_found) > 1:
+                params["end_media_id"] = images_found[-1]
             req_type = "gen_video"
 
         # Stamp running, dispatch.

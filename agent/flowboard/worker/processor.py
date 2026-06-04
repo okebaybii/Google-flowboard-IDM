@@ -192,6 +192,13 @@ async def _handle_gen_video(params: dict) -> tuple[dict, Optional[str]]:
         cleaned = [m for m in raw_starts if isinstance(m, str) and m.strip()]
         start_media_ids = [m.strip() for m in cleaned] or None
 
+    end_media_id = params.get("end_media_id") or params.get("endMediaId")
+    raw_ends = params.get("end_media_ids")
+    end_media_ids: Optional[list[str]] = None
+    if isinstance(raw_ends, list):
+        cleaned_ends = [m for m in raw_ends if isinstance(m, str) and m.strip()]
+        end_media_ids = [m.strip() for m in cleaned_ends] or None
+
     if not isinstance(prompt, str) or not prompt.strip():
         return {}, "missing_prompt"
     if not isinstance(project_id, str) or not project_id.strip():
@@ -226,6 +233,10 @@ async def _handle_gen_video(params: dict) -> tuple[dict, Optional[str]]:
         aspect_ratio=aspect,
         paygate_tier=tier,
         video_quality=video_quality,
+        end_media_id=end_media_id.strip()
+        if isinstance(end_media_id, str) and end_media_id.strip()
+        else None,
+        end_media_ids=end_media_ids,
     )
     if dispatch.get("error"):
         return dispatch, str(dispatch["error"])[:200]

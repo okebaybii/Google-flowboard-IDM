@@ -267,7 +267,11 @@ export function GenerationDialog() {
   // Per-variant selection for multi-source i2v. Default: all selected.
   // Stored as a Set of indices so the UI can toggle individual variants
   // and "All / None" without juggling parallel arrays.
-  const [selectedSourceIdx, setSelectedSourceIdx] = useState<Set<number>>(new Set());
+  const [selectedSourceIdx, setSelectedSourceIdx] = useState<Set<number>>(
+    new Set(),
+  );
+  // Optional: state for the end image variant picker
+  const [selectedEndSourceIdx, setSelectedEndSourceIdx] = useState<number | null>(null);
   // Tracks which Source-Reference chip's variant picker is currently
   // open. Holds the edge id the picker is anchored to (one open at a
   // time). Click another chip → swap; click the same chip → close;
@@ -320,11 +324,22 @@ export function GenerationDialog() {
   const sourceEdge = isVideo
     ? edges.find((e) => {
         if (e.target !== rfId) return false;
+        if (e.targetHandle === "end-image") return false;
         const src = nodes.find((n) => n.id === e.source);
         return src && REF_SOURCE_TYPES.has(src.data.type);
       })
     : undefined;
   const sourceNode = sourceEdge ? nodes.find((n) => n.id === sourceEdge.source) : undefined;
+
+  const endEdge = isVideo
+    ? edges.find((e) => {
+        if (e.target !== rfId) return false;
+        if (e.targetHandle === "end-image") return false;
+        const src = nodes.find((n) => n.id === e.source);
+        return src && REF_SOURCE_TYPES.has(src.data.type);
+      })
+    : undefined;
+  const endNode = endEdge ? nodes.find((n) => n.id === endEdge.source) : undefined;
 
   // Storyboard → video: when ANY upstream node is a Storyboard composite,
   // the motion prompt MUST follow a fixed template that asks Flow to
@@ -349,6 +364,12 @@ export function GenerationDialog() {
   // dense array of valid mediaIds to feed into Flow.
   const sourceMediaIds: string[] = isVideo
     ? (sourceNode?.data.mediaIds ?? (sourceMediaId ? [sourceMediaId] : []))
+        .filter((m): m is string => typeof m === "string" && m.length > 0)
+    : [];
+
+  const endMediaId = endNode?.data.mediaId ?? null;
+  const endMediaIds: string[] = isVideo
+    ? (endNode?.data.mediaIds ?? (endMediaId ? [endMediaId] : []))
         .filter((m): m is string => typeof m === "string" && m.length > 0)
     : [];
 
@@ -500,6 +521,22 @@ export function GenerationDialog() {
         upstreamNode?.data.mediaIds ??
         (upstreamNode?.data.mediaId ? [upstreamNode.data.mediaId] : []);
       setSelectedSourceIdx(new Set(ups.map((_, i) => i)));
+      
+      const endUpstreamEdge = boardEdges.find((e) => {
+        if (e.target !== rfId) return false;
+        if (e.targetHandle !== "end-image") return false;
+        const src = boardNodes.find((n) => n.id === e.source);
+        return src && REF_SOURCE_TYPES.has(src.data.type);
+      });
+      const endUpstreamNode = endUpstreamEdge
+        ? boardNodes.find((n) => n.id === endUpstreamEdge.source)
+        : undefined;
+      const endUps =
+        endUpstreamNode?.data.mediaIds ??
+        (endUpstreamNode?.data.mediaId ? [endUpstreamNode.data.mediaId] : []);
+      // Auto-select the first end variant if any exist
+      setSelectedEndSourceIdx(endUps.length > 0 ? 0 : null);
+
       triggerRef.current = document.activeElement;
       // Focus textarea on open
       setTimeout(() => firstFocusRef.current?.focus(), 50);
@@ -770,6 +807,7 @@ export function GenerationDialog() {
       // Filter the upstream variants to the user's selection — the dialog
       // shows one toggleable thumbnail per variant + an All/None action.
       const picked = sourceMediaIds.filter((_, i) => selectedSourceIdx.has(i));
+      const pickedEndId = selectedEndSourceIdx !== null ? endMediaIds[selectedEndSourceIdx] : null;
       const useMulti = picked.length > 1;
       dispatchGeneration(rfId, {
         prompt: videoPrompt,
@@ -777,6 +815,7 @@ export function GenerationDialog() {
         kind: "video",
         sourceMediaId: useMulti ? undefined : picked[0],
         sourceMediaIds: useMulti ? picked : undefined,
+        endMediaId: pickedEndId || undefined,
         // Tell the node UI how many video tiles to reserve while pending —
         // otherwise it defaults to 1 placeholder even though we're
         // dispatching N i2v ops.
@@ -1120,6 +1159,51 @@ export function GenerationDialog() {
               <div className="source-image-row source-image-row--empty">
                 Connect an upstream image node with rendered media first
               </div>
+            )}
+          </div>
+        )}
+
+        {/* End image — Veo i2v ONLY. Pick EXACTLY ONE variant to end the video. */}
+        {isVideo && !isOmniVideo && endMediaIds.length > 0 && endNode && (
+          <div className="gen-dialog__field">
+            <div className="gen-dialog__label-row">
+              <span className="gen-dialog__label">
+                End image {endMediaIds.length > 1 ? `(select one)` : ""}
+              </span>
+            </div>
+            <div className="source-image-row">
+              {endMediaIds.map((mid, i) => {
+                const checked = selectedEndSourceIdx === i;
+                return (
+                  <button
+                    key={mid}
+                    type="button"
+                    className={`source-thumb${checked ? " source-thumb--checked" : ""}`}
+                    onClick={() => {
+                      setSelectedEndSourceIdx(checked ? null : i);
+                    }}
+                    aria-pressed={checked}
+                    aria-label={`End variant ${i + 1}${checked ? " selected" : ""}`}
+                  >
+                    <img
+                      className="source-image-row__thumb"
+                      src={mediaUrl(mid)}
+                      alt={endNode.data.title}
+                    />
+                    <span className="source-thumb__check" aria-hidden="true">
+                      {checked ? "✓" : ""}
+                    </span>
+                  </button>
+                );
+              })}
+              <span className="source-image-row__label">
+                #{endNode.data.shortId}
+              </span>
+            </div>
+            {selectedEndSourceIdx === null && (
+              <p className="gen-dialog__hint" style={{ color: "#ef4444" }}>
+                Ảnh kết thúc đã được huỷ bỏ.
+              </p>
             )}
           </div>
         )}
