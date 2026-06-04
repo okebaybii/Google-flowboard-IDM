@@ -260,10 +260,22 @@ def _run_moviepy_assembly(
                             communicate = edge_tts.Communicate(narration_text.strip(), "vi-VN-HoaiMyNeural")
                             await communicate.save(temp_tts_path)
                             
-                        asyncio.run(_gen_edge_tts())
-                        logger.info(f"Edge TTS: Generated emotional neural voiceover for scene {i+1}")
+                        # Retry loop to prevent random failures causing fallback to robotic Google voice
+                        import time
+                        max_retries = 3
+                        for attempt in range(max_retries):
+                            try:
+                                asyncio.run(_gen_edge_tts())
+                                logger.info(f"Edge TTS: Generated emotional neural voiceover for scene {i+1} on attempt {attempt + 1}")
+                                break
+                            except Exception as edge_retry_err:
+                                if attempt < max_retries - 1:
+                                    logger.warning(f"Edge TTS attempt {attempt + 1} failed: {edge_retry_err}. Retrying...")
+                                    time.sleep(1.5)
+                                else:
+                                    raise edge_retry_err
                     except Exception as edge_err:
-                        logger.warning(f"Edge TTS failed, falling back to gTTS: {edge_err}")
+                        logger.warning(f"Edge TTS failed after {max_retries} attempts, falling back to gTTS: {edge_err}")
                         tts = gTTS(text=narration_text.strip(), lang="vi")
                         tts.save(temp_tts_path)
                         

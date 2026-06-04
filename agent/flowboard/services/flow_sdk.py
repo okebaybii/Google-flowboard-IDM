@@ -27,6 +27,7 @@ FLOW_API_BASE = "https://aisandbox-pa.googleapis.com"
 TRPC_CREATE_PROJECT = "https://labs.google/fx/api/trpc/project.createProject"
 TRPC_SEARCH_PROJECTS = "https://labs.google/fx/api/trpc/project.searchUserProjects"
 VIDEO_I2V_URL = f"{FLOW_API_BASE}/v1/video:batchAsyncGenerateVideoStartImage"
+VIDEO_I2V_START_END_URL = f"{FLOW_API_BASE}/v1/video:batchAsyncGenerateVideoStartAndEndImage"
 # Omni Flash uses a separate endpoint that takes referenceImages[] (multi-
 # ref, asset-typed) instead of a single startImage. Different request shape
 # from Veo i2v — see gen_video_omni() for the body assembly.
@@ -511,6 +512,9 @@ class FlowSDK:
                 end_mid = end_sources[i] if i < len(end_sources) else end_sources[0]
                 item["endImage"] = {"mediaId": end_mid}
             items.append(item)
+            
+        endpoint_url = VIDEO_I2V_START_END_URL if end_sources else VIDEO_I2V_URL
+
         body = {
             "clientContext": ctx,
             "mediaGenerationContext": {"batchId": str(uuid.uuid4())},
@@ -519,7 +523,7 @@ class FlowSDK:
         }
 
         resp = await self._client.api_request(
-            url=VIDEO_I2V_URL,
+            url=endpoint_url,
             method="POST",
             headers=dict(_API_HEADERS),
             body=body,
