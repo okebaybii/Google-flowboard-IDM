@@ -192,51 +192,43 @@ async def test_run_forwards_all_kwargs(tmp_secrets_path, fake_providers):
     assert call["timeout"] == 42.0
 
 
-# ── Real ClaudeProvider smoke (no actual subprocess) ───────────────────
+# ── Real ClaudeProvider smoke (httpx mock) ───────────────────────────
 
 @pytest.mark.asyncio
-async def test_real_claude_provider_wraps_cli_error_as_llm_error():
-    """Contract: caller doing `except LLMError:` must catch every Claude
-    failure mode. The provider translates `ClaudeCliError` → `LLMError`
-    so callers never have to import claude_cli to handle errors. Without
-    the wrap, every Claude timeout / non-zero exit / bad envelope would
-    leak through as the wrong exception type."""
-    from flowboard.services import claude_cli
+async def test_real_claude_provider_delegates_to_api(monkeypatch):
+    """Sanity check that ClaudeProvider wires through to HTTPX API."""
     from flowboard.services.llm.claude import ClaudeProvider
-
-    p = ClaudeProvider()
-    with patch(
-        "flowboard.services.claude_cli.run_claude",
-        side_effect=claude_cli.ClaudeCliError("subprocess timeout"),
-    ):
-        with pytest.raises(LLMError, match="subprocess timeout"):
-            await p.run("hello")
-    # Cause chain preserved for diagnostics — the original ClaudeCliError
-    # is still reachable via __cause__ if a logger / debugger wants it.
-
-
-@pytest.mark.asyncio
-async def test_real_claude_provider_delegates_to_claude_cli():
-    """Sanity check that ClaudeProvider actually wires through to
-    claude_cli.run_claude — caught early if the function signature drifts.
-    Uses patches, never spawns a real claude binary."""
-    from flowboard.services.llm.claude import ClaudeProvider
+    import httpx
 
     p = ClaudeProvider()
     assert p.name == "claude"
     assert p.supports_vision is True
 
-    with patch(
-        "flowboard.services.claude_cli.run_claude",
-        return_value="mocked-result",
-    ) as mock_run, patch(
-        "flowboard.services.claude_cli.is_available",
-        return_value=True,
-    ):
-        out = await p.run("hello", system_prompt="s", attachments=["/x.jpg"], timeout=5.0)
-    assert out == "mocked-result"
-    mock_run.assert_called_once()
-    kwargs = mock_run.call_args.kwargs
-    assert kwargs["system_prompt"] == "s"
-    assert kwargs["attachments"] == ["/x.jpg"]
-    assert kwargs["timeout"] == 5.0
+    secrets.set_api_key("claude", "sk-claude-test")
+
+    captured = {}
+
+    class _MockResponse:
+        status_code = 200
+        def json(self):
+            return {"content": [{"type": "text", "text": "mocked-anthropic-response"}]}
+
+    class _MockClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def post(self, url, json, headers, timeout):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            captured["timeout"] = timeout
+            return _MockResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
+
+    out = await p.run("hello", system_prompt="s", timeout=5.0)
+    assert out == "mocked-anthropic-response"
+    assert captured["url"] == "https://api.anthropic.com/v1/messages"
+    assert captured["headers"]["x-api-key"] == "sk-claude-test"
+    assert captured["json"]["system"] == "s"
+    assert captured["timeout"] == 5.0

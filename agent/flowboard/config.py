@@ -14,4 +14,7 @@ PLANNER_MODEL = os.getenv("FLOWBOARD_PLANNER_MODEL", "claude-sonnet-4-6")
 # otherwise mock. Default auto.
 PLANNER_BACKEND = os.getenv("FLOWBOARD_PLANNER_BACKEND", "auto")
 
+ALLOWED_EMAILS = [e.strip().lower() for e in os.getenv("ALLOWED_EMAILS", "").split(",") if e.strip()]
+ALLOWED_DOMAINS = [d.strip().lower() for d in os.getenv("ALLOWED_DOMAINS", "").split(",") if d.strip()]
+
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)

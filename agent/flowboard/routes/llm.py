@@ -103,11 +103,7 @@ async def set_provider_key(name: str, body: _ApiKeyBody) -> dict:
     """
     if name not in _VALID_PROVIDER_NAMES:
         raise HTTPException(status_code=404, detail=f"unknown provider {name!r}")
-    if name not in ("openai", "gemini"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"{name} doesn't accept API keys; uses CLI auth instead",
-        )
+    # All valid providers (openai, gemini, claude) accept API keys now
     secrets.set_api_key(name, body.apiKey)
     # Bust the relevant provider's availability cache so the next /providers
     # poll reflects the change immediately rather than waiting up to 60s.

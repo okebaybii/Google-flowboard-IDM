@@ -58,15 +58,13 @@ def test_list_providers_returns_all_three(client, tmp_secrets_path):
         assert "mode" in entry
 
 
-def test_list_providers_no_provider_requires_key_by_default(
+def test_list_providers_requires_key_by_default(
     client, tmp_secrets_path
 ):
-    """All three shipped providers are CLI-first. OpenAI has an API
-    fallback but its `requiresKey=false` means the CLI path is enough on
-    its own — no provider forces the user to enter a key."""
+    """All three shipped providers are REST API-first and require keys."""
     resp = client.get("/api/llm/providers")
     for entry in resp.json():
-        assert entry["requiresKey"] is False
+        assert entry["requiresKey"] is True
 
 
 def test_list_providers_does_not_leak_api_keys(client, tmp_secrets_path):
@@ -94,14 +92,7 @@ def test_set_openai_api_key(client, tmp_secrets_path):
     assert secrets.get_api_key("openai") == "sk-new"
 
 
-def test_set_key_for_cli_only_provider_returns_400(client, tmp_secrets_path):
-    """Claude doesn't accept API keys — UI shouldn't post here, but backend
-    must reject if it does."""
-    resp = client.put("/api/llm/providers/claude", json={"apiKey": "xyz"})
-    assert resp.status_code == 400
-    assert "doesn't accept API keys" in resp.json()["detail"]
-    resp = client.put("/api/llm/providers/gemini", json={"apiKey": "xyz"})
-    assert resp.status_code == 400
+# Set key tests
 
 
 def test_set_key_for_unknown_provider_returns_404(client, tmp_secrets_path):
@@ -109,18 +100,7 @@ def test_set_key_for_unknown_provider_returns_404(client, tmp_secrets_path):
     assert resp.status_code == 404
 
 
-def test_setting_key_invalidates_provider_cache(client, tmp_secrets_path):
-    """After saving a key, the next /providers call must reflect the new
-    state immediately — not wait for the 60s availability cache. OpenAI
-    is the only provider that accepts API keys; verify its cache is
-    reset on key save."""
-    openai = registry._PROVIDERS["openai"]
-    openai._cli_available = True  # type: ignore[attr-defined]
-    resp = client.put("/api/llm/providers/openai", json={"apiKey": "sk-1"})
-    assert resp.status_code == 200
-    # reset_cache() flips _cli_available back to False so the next probe
-    # re-runs the CLI version check.
-    assert openai._cli_available is False  # type: ignore[attr-defined]
+# Cache invalidation tests
 
 
 # ── POST /api/llm/providers/{name}/test ───────────────────────────────

@@ -30,20 +30,17 @@ class GeminiProvider:
     test_timeout_secs: float = 30.0  # API is faster and less prone to CLI's 429 backoff
 
     def __init__(self) -> None:
-        self._available: Optional[bool] = None
+        pass
 
     # ── availability ──────────────────────────────────────────────────
 
     async def is_available(self) -> bool:
-        """Cached check: does the user have an API key configured?"""
-        if self._available is None:
-            self._available = bool(secrets.get_api_key("gemini"))
-            logger.info("gemini: available=%s", self._available)
-        return self._available
+        """does the user have an API key configured?"""
+        return bool(secrets.get_api_key("gemini"))
 
     def reset_cache(self) -> None:
         """Testing hook + Settings panel rescan support."""
-        self._available = None
+        pass
 
     # ── dispatch ──────────────────────────────────────────────────────
 

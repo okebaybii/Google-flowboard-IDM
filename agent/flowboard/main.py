@@ -66,6 +66,44 @@ async def _run_social_scheduler() -> None:
         await asyncio.sleep(60)
 
 
+async def _run_account_expiry_scheduler() -> None:
+    """Background task that checks for expired accounts and disables them on Firebase every minute."""
+    from datetime import datetime, timezone
+    import firebase_admin
+    from firebase_admin import auth as firebase_auth
+    from flowboard.db.models import UserAccount
+    from sqlmodel import select
+    
+    while True:
+        try:
+            has_firebase = len(firebase_admin._apps) > 0
+            now = datetime.now(timezone.utc)
+            with get_session() as session:
+                stmt = select(UserAccount).where(
+                    UserAccount.is_approved == True,
+                    UserAccount.expires_at != None
+                )
+                users = session.exec(stmt).all()
+                for u in users:
+                    expires_utc = u.expires_at.replace(tzinfo=timezone.utc) if u.expires_at.tzinfo is None else u.expires_at
+                    if now > expires_utc:
+                        u.is_approved = False
+                        session.add(u)
+                        logger.warning(f"Background worker: User {u.email} ({u.firebase_uid}) has expired. Revoking approval.")
+                        
+                        if has_firebase:
+                            try:
+                                firebase_auth.update_user(u.firebase_uid, disabled=True)
+                                logger.info(f"Background worker: Disabled expired user {u.email} in Firebase Auth.")
+                            except Exception as fb_err:
+                                logger.error(f"Background worker: Failed to disable user in Firebase: {fb_err}")
+                session.commit()
+        except Exception as e:
+            logger.error(f"Error in account expiry scheduler: {e}")
+            
+        await asyncio.sleep(60)
+
+
 def _auto_import_facebook_accounts() -> None:
     """Auto-import Facebook accounts from .env file."""
     import os
@@ -141,7 +179,8 @@ async def lifespan(app: FastAPI):
     ws_task = asyncio.create_task(run_ws_server(), name="ext-ws-server")
     worker_task = asyncio.create_task(worker.start(), name="request-worker")
     scheduler_task = asyncio.create_task(_run_social_scheduler(), name="social-scheduler")
-    logger.info("flowboard agent started (ws:9223 + worker + social-scheduler)")
+    expiry_task = asyncio.create_task(_run_account_expiry_scheduler(), name="account-expiry-scheduler")
+    logger.info("flowboard agent started (ws:9223 + worker + social-scheduler + expiry-scheduler)")
     try:
         yield
     finally:
@@ -150,9 +189,9 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(worker.drain(), timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning("worker drain timed out")
-        for t in (ws_task, worker_task, scheduler_task):
+        for t in (ws_task, worker_task, scheduler_task, expiry_task):
             t.cancel()
-        await asyncio.gather(ws_task, worker_task, scheduler_task, return_exceptions=True)
+        await asyncio.gather(ws_task, worker_task, scheduler_task, expiry_task, return_exceptions=True)
         logger.info("flowboard agent stopped")
 
 
@@ -170,6 +209,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def user_context_middleware(request: FastAPIRequest, call_next):
+    authorization = request.headers.get("authorization")
+    uid = None
+    if authorization and authorization.startswith("Bearer "):
+        id_token = authorization.split(" ")[1]
+        try:
+            from flowboard.routes.firebase_auth import verify_firebase_token
+            user_info = verify_firebase_token(id_token)
+            uid = user_info.get("uid")
+        except Exception:
+            pass
+
+    from flowboard.services.llm.secrets import current_user_uid_var
+    token = current_user_uid_var.set(uid)
+    try:
+        return await call_next(request)
+    finally:
+        current_user_uid_var.reset(token)
 
 app.include_router(firebase_auth.router)
 app.include_router(boards.router)

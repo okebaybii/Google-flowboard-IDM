@@ -8,6 +8,7 @@ import {
 import { useGenerationStore } from "../store/generation";
 import { getLatestRelease, isNewerVersion, type LatestRelease } from "../api/github";
 import { SettingsPanel } from "./SettingsPanel";
+import { useAuthStore } from "../store/auth";
 import packageJson from "../../package.json";
 
 const APP_VERSION: string = packageJson.version;
@@ -28,6 +29,7 @@ const APP_VERSION: string = packageJson.version;
  */
 export function AccountPanel({ collapsed = false }: { collapsed?: boolean }) {
   const setStorePaygateTier = useGenerationStore.setState;
+  const { user: currentUser } = useAuthStore();
   const [open, setOpen] = useState(false);
   const [profile, setProfile] = useState<AuthMe | null>(null);
   // Counts polls that returned a profile but no tier. Used to delay
@@ -66,8 +68,10 @@ export function AccountPanel({ collapsed = false }: { collapsed?: boolean }) {
         setStorePaygateTier({ paygateTier: null });
         setPollsWithoutTier((n) => n + 1);
       }
-      if (me?.email && me?.paygate_tier) return;
-      timer = setTimeout(poll, 5000);
+      
+      // Adaptive polling: poll every 1.5s when disconnected or loading, 5s when connected
+      const isFullyConnected = !!(me?.email && me?.paygate_tier);
+      timer = setTimeout(poll, isFullyConnected ? 5000 : 1500);
     };
     poll();
     return () => {
@@ -279,7 +283,7 @@ export function AccountPanel({ collapsed = false }: { collapsed?: boolean }) {
             )}
           </div>
         )}
-        {email && (
+        {(email || currentUser) && (
           <button
             type="button"
             className="account-panel__cog"
@@ -339,9 +343,6 @@ export function AccountPanel({ collapsed = false }: { collapsed?: boolean }) {
       <SettingsPanel
         open={open}
         onClose={() => setOpen(false)}
-        // Sign out lives in Settings now — only render the action when
-        // there's actually a session to drop (no `email` = nothing to
-        // sign out from).
         onLogout={email ? async () => {
           await handleLogout();
           setOpen(false);

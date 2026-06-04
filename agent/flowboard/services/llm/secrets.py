@@ -28,11 +28,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import contextvars
 from pathlib import Path
 from typing import Optional
 
+from flowboard.db import get_auth_session
+from flowboard.db.models import UserAccount
+
 logger = logging.getLogger(__name__)
 
+current_user_uid_var = contextvars.ContextVar("current_user_uid", default=None)
 
 _DEFAULT_PATH = Path.home() / ".flowboard" / "secrets.json"
 
@@ -48,9 +53,53 @@ def _path() -> Path:
     return Path(override) if override else _DEFAULT_PATH
 
 
+def _is_multi_tenant() -> bool:
+    """True when Firebase is initialized → we're in multi-user web mode.
+    In this mode, secrets must come from per-user SQLite, never the global file.
+    """
+    if os.getenv("TESTING") == "true":
+        return False
+    try:
+        import firebase_admin
+        return len(firebase_admin._apps) > 0
+    except ImportError:
+        return False
+
+
 def read() -> dict:
-    """Load the full secrets document. Empty dict if file doesn't exist
-    or is corrupt — callers must handle missing keys themselves."""
+    """Load secrets document.
+
+    Multi-tenant mode (Firebase initialized):
+      - If current_user_uid is set → read from SQLite per-user record.
+      - If uid is None (unauthenticated request) → return empty dict.
+        NEVER fall back to the global file — that would leak one user's
+        keys to another user's session.
+
+    Single-user / test mode (no Firebase):
+      - Fall back to ~/.flowboard/secrets.json for backward compat.
+    """
+    uid = current_user_uid_var.get()
+    multi = _is_multi_tenant()
+
+    if uid:
+        # Authenticated user → always read from their DB record
+        with get_auth_session() as session:
+            user_acc = session.get(UserAccount, uid)
+            if user_acc:
+                doc = user_acc.llm_secrets or {}
+                has_keys = bool((doc.get("apiKeys") or {}))
+                logger.debug("secrets.read: uid=%s → DB hit, has_keys=%s", uid, has_keys)
+                return doc
+        logger.debug("secrets.read: uid=%s → no UserAccount row, returning empty", uid)
+        return {}
+
+    if multi:
+        # Firebase is running but no uid → unauthenticated request.
+        # Return empty to prevent leaking the global secrets file.
+        logger.debug("secrets.read: uid=None, multi_tenant=True → returning empty (no leak)")
+        return {}
+
+    # No Firebase, no uid → single-user / test mode → use file
     p = _path()
     if not p.exists():
         return {}
@@ -62,7 +111,22 @@ def read() -> dict:
 
 
 def write(payload: dict) -> None:
-    """Atomic write with mode 0o600. Creates parent dir if needed."""
+    """Write secrets. Multi-tenant aware — same isolation rules as read()."""
+    uid = current_user_uid_var.get()
+    if uid:
+        with get_auth_session() as session:
+            user_acc = session.get(UserAccount, uid)
+            if user_acc:
+                user_acc.llm_secrets = payload
+                session.add(user_acc)
+                session.commit()
+        return
+
+    if _is_multi_tenant():
+        # Firebase is running but no uid → refuse to write to global file.
+        logger.warning("secrets: write() called in multi-tenant mode without uid, ignoring")
+        return
+
     p = _path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")

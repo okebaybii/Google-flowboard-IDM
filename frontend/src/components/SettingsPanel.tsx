@@ -7,10 +7,11 @@ import {
 } from "../store/settings";
 import { getLatestRelease, isNewerVersion, type LatestRelease } from "../api/github";
 import { SocialAccountsSection } from "./settings/SocialAccountsSection";
+import { useAuthStore } from "../store/auth";
+import { MembersSection } from "./settings/MembersSection";
 import packageJson from "../../package.json";
 
 const APP_VERSION: string = packageJson.version;
-const COMMUNITY_URL = "https://www.facebook.com/groups/flowkit.flowboard.community";
 
 /**
  * Dashboard Settings popover anchored to the AccountPanel gear button.
@@ -98,6 +99,14 @@ export function SettingsPanel({ open, onClose, onLogout, logoutPending }: Settin
   const setVideoModel = useSettingsStore((s) => s.setVideoModel);
 
   const panelRef = useRef<HTMLDivElement>(null);
+  const { user: currentUser } = useAuthStore();
+  const [activeTab, setActiveTab] = useState<"settings" | "members">("settings");
+
+  useEffect(() => {
+    if (open) {
+      setActiveTab("settings");
+    }
+  }, [open]);
 
   // Esc closes (click-outside is handled by the backdrop's onClick).
   useEffect(() => {
@@ -144,24 +153,47 @@ export function SettingsPanel({ open, onClose, onLogout, logoutPending }: Settin
     >
       <div
         ref={panelRef}
-        className="settings-panel"
+        className={`settings-panel${activeTab === "members" ? " settings-panel--wide" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
       >
         <div className="settings-panel__header">
-        <span className="settings-panel__title">Settings</span>
-        <button
-          type="button"
-          className="settings-panel__close"
-          onClick={onClose}
-          aria-label="Close settings"
-        >
-          ×
-        </button>
-      </div>
+          {currentUser?.is_admin ? (
+            <div className="settings-panel__tabs">
+              <button
+                type="button"
+                className={`settings-panel__tab${activeTab === "settings" ? " settings-panel__tab--active" : ""}`}
+                onClick={() => setActiveTab("settings")}
+              >
+                ⚙ Cấu hình
+              </button>
+              <button
+                type="button"
+                className={`settings-panel__tab${activeTab === "members" ? " settings-panel__tab--active" : ""}`}
+                onClick={() => setActiveTab("members")}
+              >
+                👥 Thành viên
+              </button>
+            </div>
+          ) : (
+            <span className="settings-panel__title">Settings</span>
+          )}
+          <button
+            type="button"
+            className="settings-panel__close"
+            onClick={onClose}
+            aria-label="Close settings"
+          >
+            ×
+          </button>
+        </div>
 
-      <div className="settings-panel__section">
+        {activeTab === "members" ? (
+          <MembersSection />
+        ) : (
+          <>
+            <div className="settings-panel__section">
         <div className="settings-panel__label">Account tier</div>
         <div className="settings-panel__value settings-panel__value--readonly">
           {tierLabel}
@@ -279,17 +311,6 @@ export function SettingsPanel({ open, onClose, onLogout, logoutPending }: Settin
             )}
           </span>
         </div>
-        <div className="settings-panel__about-row">
-          <span className="settings-panel__about-key">Community</span>
-          <a
-            className="settings-panel__about-link"
-            href={COMMUNITY_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            FlowKit & Flowboard on Facebook →
-          </a>
-        </div>
       </div>
 
       {onLogout && (
@@ -312,6 +333,8 @@ export function SettingsPanel({ open, onClose, onLogout, logoutPending }: Settin
           </div>
         </div>
       )}
+          </>
+        )}
       </div>
     </div>
   );

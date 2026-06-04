@@ -8,6 +8,7 @@ import {
   onAuthStateChanged 
 } from "firebase/auth";
 import { firebaseAuth, hasRealFirebase } from "../lib/firebase";
+import { logoutExtension } from "../api/client";
 
 function generateUUID() {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -71,6 +72,10 @@ export const useAuthStore = create<AuthState>((set, get) => {
         const errData = await response.json();
         if (response.status === 403 && errData.detail === "account_not_approved") {
           errorMsg = "Tài khoản của bạn đang chờ Admin kích hoạt trên Firebase Console. Vui lòng liên hệ quản trị viên!";
+        } else if (response.status === 403 && errData.detail === "account_expired") {
+          errorMsg = "Tài khoản của bạn đã hết hạn sử dụng. Vui lòng liên hệ quản trị viên để gia hạn!";
+        } else if (response.status === 403 && errData.detail === "email_not_whitelisted") {
+          errorMsg = "Email của bạn không nằm trong danh sách được phép truy cập hệ thống!";
         } else if (errData.detail === "session_conflict") {
           set({ sessionConflict: true });
           return null;
@@ -328,6 +333,11 @@ export const useAuthStore = create<AuthState>((set, get) => {
 
     logout: async () => {
       set({ loading: true });
+      try {
+        await logoutExtension();
+      } catch (err) {
+        console.error("Extension logout failed:", err);
+      }
       if (hasRealFirebase && firebaseAuth) {
         try {
           await signOut(firebaseAuth);

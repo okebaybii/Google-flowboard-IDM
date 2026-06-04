@@ -286,4 +286,6 @@ class UserAccount(SQLModel, table=True):
     email: str
     is_approved: bool = Field(default=False)
     is_admin: bool = Field(default=False)
+    expires_at: Optional[datetime] = Field(default=None)
+    llm_secrets: dict = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_utcnow)

@@ -30,20 +30,17 @@ class ClaudeProvider:
     test_timeout_secs: float = 30.0
 
     def __init__(self) -> None:
-        self._available: Optional[bool] = None
+        pass
 
     # ── availability ──────────────────────────────────────────────────
 
     async def is_available(self) -> bool:
-        """Cached check: does the user have an API key configured?"""
-        if self._available is None:
-            self._available = bool(secrets.get_api_key("claude"))
-            logger.info("claude: available=%s", self._available)
-        return self._available
+        """does the user have an API key configured?"""
+        return bool(secrets.get_api_key("claude"))
 
     def reset_cache(self) -> None:
         """Testing hook + Settings panel rescan support."""
-        self._available = None
+        pass
 
     # ── dispatch ──────────────────────────────────────────────────────
 

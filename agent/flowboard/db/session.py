@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-
+from typing import Optional, Iterator
 from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -62,6 +62,9 @@ def init_db() -> None:
 
 
 @contextmanager
-def get_session():
+def get_session(uid: Optional[str] = None) -> Iterator[Session]:
     with Session(engine) as session:
         yield session
+
+# Alias for compatibility with the user administration code
+get_auth_session = get_session

@@ -222,7 +222,8 @@ function connectToAgent() {
         } else if (flowKey) {
           fetchAndPushUserInfo(flowKey);
         } else {
-          console.log('[Flowboard] please_resend_userinfo: no token captured yet');
+          console.log('[Flowboard] please_resend_userinfo: no token captured yet, attempting auto-capture');
+          captureTokenFromFlowTab();
         }
       } else if (msg.method === 'api_request') {
         await handleApiRequest(msg);
