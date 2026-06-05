@@ -334,6 +334,7 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
             base_x = node.x
             base_y = node.y
             
+            prev_img_node = None
             for i, scene in enumerate(scenes):
                 # Spawn image node
                 img_short_id = generate_unique_short_id(s, board_id)
@@ -363,6 +364,18 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                     )
                     s.add(edge_ref)
                 
+                # Chain from previous image node for scenery/visual consistency
+                if prev_img_node:
+                    edge_img_chain = Edge(
+                        board_id=board_id,
+                        source_id=prev_img_node.id,
+                        target_id=img_node.id,
+                        kind="ref"
+                    )
+                    s.add(edge_img_chain)
+                
+                prev_img_node = img_node
+                
                 # Spawn video node
                 vid_short_id = generate_unique_short_id(s, board_id)
                 vid_node = Node(
@@ -390,6 +403,7 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                     kind="ref"
                 )
                 s.add(edge1)
+                
                 
                 # Connect video to assembly
                 if assembly_node_id:

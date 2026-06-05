@@ -192,7 +192,7 @@ def _run_moviepy_assembly(
     This function executes in a separate thread to prevent blocking the async loop.
     """
     from moviepy import VideoFileClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip, ImageClip
-    from moviepy.video.fx import Resize, Crop, MultiplySpeed
+    from moviepy.video.fx import Resize, Crop, MultiplySpeed, CrossFadeIn
     from gtts import gTTS
     import os
 
@@ -319,10 +319,15 @@ def _run_moviepy_assembly(
                 tts_audio_clips.append(tts_clip)
                     
             # Update cumulative time based on the actual duration of the final clip
-            cumulative_time += clip.duration
+            # Trừ đi 0.5s (transition fade) để narration đoạn sau khớp đúng lúc bắt đầu scene mới
+            cumulative_time += clip.duration - 0.5
         
-        # 3. Concatenate video clips directly (direct cuts) as requested
-        final_clip = concatenate_videoclips(clips, method="chain")
+        # 3. Concatenate video clips with crossfade transitions
+        clips_with_fade = [clips[0]]
+        for c in clips[1:]:
+            clips_with_fade.append(c.with_effects([CrossFadeIn(0.5)]))
+            
+        final_clip = concatenate_videoclips(clips_with_fade, padding=-0.5, method="compose")
         video_duration = final_clip.duration
         
         # 4. Mix audio components (Background Music at 20% volume + TTS Voiceover)
@@ -850,11 +855,27 @@ async def run_batch_generation(
                             break
                     
                     final_prompt = prompt
+                    
+                    # Thu thập text từ prompt, image, storyboard upstream để đồng bộ
+                    # context xuyên suốt pipeline (khung cảnh/scenery)
+                    image_aspect_ratio = None
+                    for pe in parent_edges:
+                        pn = session.get(Node, pe.source_id)
+                        if pn and pn.type in ("prompt", "image", "Storyboard"):
+                            pn_text = pn.data.get("prompt", "").strip()
+                            if pn.type in ("image", "Storyboard") and node.type in ("image", "Storyboard"):
+                                pass  # Do not inherit previous image prompt to prevent exponential growth
+                            else:
+                                if pn_text and pn_text not in final_prompt:
+                                    final_prompt += f". {pn_text}"
+                            if pn.type in ("image", "Storyboard"):
+                                image_aspect_ratio = pn.data.get("aspectRatio")
+                    
                     if style_node:
                         style_id = style_node.data.get("activeStyleId", "hollywood")
                         suffix = STYLE_PROMPTS.get(style_id, "")
                         if suffix:
-                            final_prompt = f"{prompt}{suffix}"
+                            final_prompt = f"{final_prompt}{suffix}"
                     
                     # Build dispatch params. Match the manual generation path as
                     # closely as possible so batch output keeps the same character,
@@ -903,6 +924,11 @@ async def run_batch_generation(
                         vid_aspect = node.data.get("aspectRatio") or batch_video_aspect_ratio
                         if batch_video_aspect_ratio:
                             vid_aspect = batch_video_aspect_ratio
+                        elif image_aspect_ratio:
+                            if image_aspect_ratio == "IMAGE_ASPECT_RATIO_PORTRAIT":
+                                vid_aspect = "VIDEO_ASPECT_RATIO_PORTRAIT"
+                            elif image_aspect_ratio == "IMAGE_ASPECT_RATIO_LANDSCAPE":
+                                vid_aspect = "VIDEO_ASPECT_RATIO_LANDSCAPE"
 
                         if is_omni:
                             ref_media_ids = _collect_reference_media_ids(
@@ -949,6 +975,15 @@ async def run_batch_generation(
                                 session.commit()
                                 continue
 
+                            # Thu thập ref_media_ids từ character/visual_asset
+                            # để Veo i2v giữ đúng nhân vật qua liên kết
+                            veo_ref_ids = _collect_reference_media_ids(
+                                nid,
+                                session,
+                                incoming,
+                                ref_source_types,
+                            )
+
                             params = {
                                 "prompt": f"{final_prompt}{_batch_camera_suffix(batch_camera_mode)}",
                                 "project_id": project_id,
@@ -956,6 +991,8 @@ async def run_batch_generation(
                                 "paygate_tier": paygate_tier,
                                 "video_quality": node.data.get("videoQuality") or video_quality or "fast",
                             }
+                            if veo_ref_ids:
+                                params["ref_media_ids"] = veo_ref_ids
                             if len(start_media_ids) > 1:
                                 params["start_media_ids"] = start_media_ids
                             else:
@@ -1077,9 +1114,34 @@ async def run_batch_generation(
                 await _assemble_videos_impl(assembly_node_id, video_order, audio_media_id)
             except Exception as ae:
                 logger.error(f"Auto-assembly failed for node {assembly_node_id}: {ae}")
+                with get_session() as session:
+                    assembly_node = session.get(Node, assembly_node_id)
+                    if assembly_node:
+                        assembly_node.status = "error"
+                        assembly_node.data = {**dict(assembly_node.data), "error": str(ae)}
+                        session.add(assembly_node)
+                        session.commit()
+        else:
+            with get_session() as session:
+                assembly_node = session.get(Node, assembly_node_id)
+                if assembly_node:
+                    if failed_nodes:
+                        assembly_node.status = "error"
+                        assembly_node.data = {**dict(assembly_node.data), "error": f"{len(failed_nodes)} upstream nodes failed."}
+                    else:
+                        assembly_node.status = "done"
+                    session.add(assembly_node)
+                    session.commit()
                     
     except Exception as e:
         logger.error(f"Error in batch generation: {e}", exc_info=True)
+        with get_session() as session:
+            assembly_node = session.get(Node, assembly_node_id)
+            if assembly_node:
+                assembly_node.status = "error"
+                assembly_node.data = {**dict(assembly_node.data), "error": str(e)}
+                session.add(assembly_node)
+                session.commit()
 
 
 @router.post("/node/{node_id}/generate-all")
@@ -1098,15 +1160,35 @@ async def generate_all_nodes(
             
         board_id = node.board_id
         project_mapping = session.get(BoardFlowProject, board_id)
+        
+        # Tự động khởi tạo Flow project nếu board chưa liên kết
         if not project_mapping:
-            raise HTTPException(
-                status_code=400,
-                detail="Flow project not initialized for this board. Please open Flow first."
-            )
+            from flowboard.db.models import Board
+            board = session.get(Board, board_id)
+            if not board:
+                raise HTTPException(status_code=404, detail="Board not found")
+                
+            from flowboard.services.flow_sdk import get_flow_sdk
+            sdk = get_flow_sdk()
+            resp = await sdk.create_project(title=board.name or "Untitled")
+            if resp.get("error"):
+                raise HTTPException(status_code=502, detail=f"Lỗi tạo Flow project: {resp['error']}")
+            
+            project_id = resp.get("project_id")
+            if not project_id:
+                raise HTTPException(status_code=502, detail="Invalid project_id returned from Flow SDK")
+                
+            project_mapping = BoardFlowProject(board_id=board_id, flow_project_id=project_id)
+            session.add(project_mapping)
+            session.commit()
             
         project_id = project_mapping.flow_project_id
         from flowboard.services.flow_client import flow_client
         paygate_tier = req.paygate_tier or flow_client.paygate_tier or "PAYGATE_TIER_ONE"
+        
+        node.status = "queued"
+        session.add(node)
+        session.commit()
         
     background_tasks.add_task(
         run_batch_generation,
