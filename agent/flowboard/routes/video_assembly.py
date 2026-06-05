@@ -180,13 +180,13 @@ def detect_audio_beats(audio_path: str, video_duration: float) -> list[float]:
 
 
 def _run_moviepy_assembly(
-    video_paths: List[str],
-    narrations: List[str],
+    video_paths: list[str],
+    narrations: list[str],
     audio_path: Optional[str],
     output_path: str,
     node_id: Optional[int] = None,
     aspect_ratio: str = "16:9"
-) -> None:
+):
     """Concatenate videos and overlay audio + dynamic TTS narration using MoviePy.
     
     This function executes in a separate thread to prevent blocking the async loop.
@@ -204,170 +204,326 @@ def _run_moviepy_assembly(
     clips = []
     tts_audio_clips = []
     temp_files = []
+    
+    CHUNK_SIZE = 10
+    total_clips = len(video_paths)
+    
     try:
-        # Load raw clips
-        raw_clips = []
-        for path in video_paths:
-            c = VideoFileClip(path)
-            if c.w != target_w or c.h != target_h:
-                scale = max(target_w / c.w, target_h / c.h)
-                new_w = int(round(c.w * scale))
-                new_h = int(round(c.h * scale))
-                if new_w % 2 != 0:
-                    new_w += 1
-                if new_h % 2 != 0:
-                    new_h += 1
-                c = c.with_effects([
-                    Resize(new_size=(new_w, new_h)),
-                    Crop(x_center=new_w/2, y_center=new_h/2, width=target_w, height=target_h)
-                ])
-                logger.info(f"Aspect Ratio Alignment: Resized and center-cropped clip {path} to target {target_w}x{target_h}")
-            raw_clips.append(c)
+        if total_clips <= CHUNK_SIZE:
+            # --- BẮT ĐẦU: LOGIC GỐC CHO VIDEO NGẮN ---
+            raw_clips = []
+            for path in video_paths:
+                c = VideoFileClip(path)
+                if c.w != target_w or c.h != target_h:
+                    scale = max(target_w / c.w, target_h / c.h)
+                    new_w = int(round(c.w * scale))
+                    new_h = int(round(c.h * scale))
+                    if new_w % 2 != 0:
+                        new_w += 1
+                    if new_h % 2 != 0:
+                        new_h += 1
+                    c = c.with_effects([
+                        Resize(new_size=(new_w, new_h)),
+                        Crop(x_center=new_w/2, y_center=new_h/2, width=target_w, height=target_h)
+                    ])
+                    logger.info(f"Aspect Ratio Alignment: Resized and center-cropped clip {path} to target {target_w}x{target_h}")
+                raw_clips.append(c)
 
-        # 1. Detect audio beats if bg music exists
-        total_raw_duration = sum(c.duration for c in raw_clips)
-        beats = detect_audio_beats(audio_path, total_raw_duration) if audio_path else []
+            # 1. Detect audio beats if bg music exists
+            total_raw_duration = sum(c.duration for c in raw_clips)
+            beats = detect_audio_beats(audio_path, total_raw_duration) if audio_path else []
 
-        # 2. Load video clips, align durations, and generate aligned TTS narration audio
-        cumulative_time = 0.0
-        for i, clip in enumerate(raw_clips):
-            natural_duration = clip.duration
-            target_end_time = cumulative_time + natural_duration
-            
-            # Align end of clip to closest music beat (except the last clip)
-            if i < len(raw_clips) - 1 and beats:
-                closest_beat = min(beats, key=lambda b: abs(b - target_end_time))
-                if abs(closest_beat - target_end_time) <= 1.0:
-                    new_duration = closest_beat - cumulative_time
-                    if new_duration > 0.5:
-                        clip = clip.subclipped(0, new_duration)
-                        logger.info(f"Beat-matching: aligned scene {i+1} duration from {natural_duration:.2f}s to {new_duration:.2f}s (beat at {closest_beat:.2f}s)")
-            
-            # Generate TTS narration audio for this scene
-            narration_text = narrations[i] if i < len(narrations) else ""
-            tts_duration = 0.0
-            tts_clip = None
-            if narration_text and narration_text.strip():
-                try:
-                    # Create temporary TTS file
-                    temp_tts_path = f"temp_tts_{i}_{os.getpid()}.mp3"
-                    
+            # 2. Load video clips, align durations, and generate aligned TTS narration audio
+            cumulative_time = 0.0
+            for i, clip in enumerate(raw_clips):
+                natural_duration = clip.duration
+                target_end_time = cumulative_time + natural_duration
+                
+                # Align end of clip to closest music beat (except the last clip)
+                if i < len(raw_clips) - 1 and beats:
+                    closest_beat = min(beats, key=lambda b: abs(b - target_end_time))
+                    if abs(closest_beat - target_end_time) <= 1.0:
+                        new_duration = closest_beat - cumulative_time
+                        if new_duration > 0.5:
+                            clip = clip.subclipped(0, new_duration)
+                            logger.info(f"Beat-matching: aligned scene {i+1} duration from {natural_duration:.2f}s to {new_duration:.2f}s (beat at {closest_beat:.2f}s)")
+                
+                # Generate TTS narration audio for this scene
+                narration_text = narrations[i] if i < len(narrations) else ""
+                tts_duration = 0.0
+                tts_clip = None
+                if narration_text and narration_text.strip():
                     try:
-                        import edge_tts
-                        import asyncio
-                        
-                        async def _gen_edge_tts():
-                            communicate = edge_tts.Communicate(narration_text.strip(), "vi-VN-HoaiMyNeural")
-                            await communicate.save(temp_tts_path)
+                        temp_tts_path = f"temp_tts_{i}_{os.getpid()}.mp3"
+                        try:
+                            import edge_tts
+                            import asyncio
+                            async def _gen_edge_tts():
+                                communicate = edge_tts.Communicate(narration_text.strip(), "vi-VN-HoaiMyNeural")
+                                await communicate.save(temp_tts_path)
+                            import time
+                            max_retries = 3
+                            for attempt in range(max_retries):
+                                try:
+                                    asyncio.run(_gen_edge_tts())
+                                    logger.info(f"Edge TTS: Generated emotional neural voiceover for scene {i+1} on attempt {attempt + 1}")
+                                    break
+                                except Exception as edge_retry_err:
+                                    if attempt < max_retries - 1:
+                                        logger.warning(f"Edge TTS attempt {attempt + 1} failed: {edge_retry_err}. Retrying...")
+                                        time.sleep(1.5)
+                                    else:
+                                        raise edge_retry_err
+                        except Exception as edge_err:
+                            logger.warning(f"Edge TTS failed after {max_retries} attempts, falling back to gTTS: {edge_err}")
+                            tts = gTTS(text=narration_text.strip(), lang="vi")
+                            tts.save(temp_tts_path)
                             
-                        # Retry loop to prevent random failures causing fallback to robotic Google voice
-                        import time
-                        max_retries = 3
-                        for attempt in range(max_retries):
-                            try:
-                                asyncio.run(_gen_edge_tts())
-                                logger.info(f"Edge TTS: Generated emotional neural voiceover for scene {i+1} on attempt {attempt + 1}")
-                                break
-                            except Exception as edge_retry_err:
-                                if attempt < max_retries - 1:
-                                    logger.warning(f"Edge TTS attempt {attempt + 1} failed: {edge_retry_err}. Retrying...")
-                                    time.sleep(1.5)
-                                else:
-                                    raise edge_retry_err
-                    except Exception as edge_err:
-                        logger.warning(f"Edge TTS failed after {max_retries} attempts, falling back to gTTS: {edge_err}")
-                        tts = gTTS(text=narration_text.strip(), lang="vi")
-                        tts.save(temp_tts_path)
+                        temp_files.append(temp_tts_path)
+                        tts_clip = AudioFileClip(temp_tts_path)
+                        tts_duration = tts_clip.duration
+                    except Exception as tts_err:
+                        logger.error(f"Failed to generate TTS for scene {i}: {tts_err}")
+                
+                # Dynamic speed stretching or hybrid freeze-frame to sync frames to narration
+                if tts_duration > clip.duration:
+                    factor = clip.duration / tts_duration
+                    if factor >= 0.5:
+                        logger.info(f"Speed Stretching: slow down scene {i+1} from {clip.duration:.2f}s to {tts_duration:.2f}s (factor {factor:.2f})")
+                        try:
+                            clip = clip.with_effects([MultiplySpeed(factor)])
+                        except Exception as speed_err:
+                            logger.error(f"Failed to apply speed stretching: {speed_err}")
+                    else:
+                        logger.info(f"Speed Hybrid: slow down to 50% speed and freeze last frame.")
+                        try:
+                            clip = clip.with_effects([MultiplySpeed(0.5)])
+                            freeze_duration = tts_duration - clip.duration
+                            last_frame = clip.get_frame(clip.duration - 0.05)
+                            fps = clip.fps or 24
+                            freeze_clip = ImageClip(last_frame).with_duration(freeze_duration).with_fps(fps)
+                            clip = concatenate_videoclips([clip, freeze_clip])
+                        except Exception as hybrid_err:
+                            logger.error(f"Failed to apply hybrid speed/freeze effect: {hybrid_err}")
+                
+                clips.append(clip)
+                if tts_clip:
+                    tts_clip = tts_clip.with_start(cumulative_time)
+                    tts_audio_clips.append(tts_clip)
                         
-                    temp_files.append(temp_tts_path)
-                    
-                    # Load TTS audio
-                    tts_clip = AudioFileClip(temp_tts_path)
-                    tts_duration = tts_clip.duration
-                except Exception as tts_err:
-                    logger.error(f"Failed to generate TTS for scene {i}: {tts_err}")
+                cumulative_time += clip.duration - 0.5
             
-            # Dynamic speed stretching or hybrid freeze-frame to sync frames to narration
-            if tts_duration > clip.duration:
-                factor = clip.duration / tts_duration
-                if factor >= 0.5:
-                    # Stretch speed down to match narration length perfectly
-                    logger.info(f"Speed Stretching: slow down scene {i+1} from {clip.duration:.2f}s to {tts_duration:.2f}s (factor {factor:.2f})")
-                    try:
-                        clip = clip.with_effects([MultiplySpeed(factor)])
-                    except Exception as speed_err:
-                        logger.error(f"Failed to apply speed stretching: {speed_err}")
+            clips_with_fade = [clips[0]]
+            for c in clips[1:]:
+                clips_with_fade.append(c.with_effects([CrossFadeIn(0.5)]))
+                
+            final_clip = concatenate_videoclips(clips_with_fade, padding=-0.5, method="compose")
+            video_duration = final_clip.duration
+            
+            audio_components = []
+            if audio_path:
+                bg_music = AudioFileClip(audio_path)
+                if bg_music.duration > video_duration:
+                    bg_music = bg_music.subclipped(0, video_duration)
                 else:
-                    # Limit slowdown to 50%, freeze the last frame for remaining duration
-                    logger.info(f"Speed Hybrid: slow down to 50% speed and freeze last frame.")
-                    try:
-                        clip = clip.with_effects([MultiplySpeed(0.5)])
-                        freeze_duration = tts_duration - clip.duration
-                        last_frame = clip.get_frame(clip.duration - 0.05)
-                        fps = clip.fps or 24
-                        freeze_clip = ImageClip(last_frame).with_duration(freeze_duration).with_fps(fps)
-                        clip = concatenate_videoclips([clip, freeze_clip])
-                    except Exception as hybrid_err:
-                        logger.error(f"Failed to apply hybrid speed/freeze effect: {hybrid_err}")
+                    bg_music = bg_music.with_duration(video_duration)
+                bg_music = bg_music.volumex(0.2)
+                audio_components.append(bg_music)
+                
+            if tts_audio_clips:
+                audio_components.extend(tts_audio_clips)
+                
+            if audio_components:
+                final_audio = CompositeAudioClip(audio_components)
+                final_clip = final_clip.with_audio(final_audio)
+                
+            logger_obj = DBProgressBarLogger(node_id) if node_id is not None else None
+            final_clip.write_videofile(
+                output_path,
+                codec="libx264",
+                audio_codec="aac",
+                temp_audiofile="temp-audio.m4a",
+                remove_temp=True,
+                logger=logger_obj
+            )
+            final_clip.close()
+            # --- KẾT THÚC: LOGIC GỐC CHO VIDEO NGẮN ---
+            return
+
+        # ==============================================================================
+        # --- BẮT ĐẦU: LOGIC CHUNKED ASSEMBLY CHO VIDEO RẤT DÀI (CHỐNG OOM) ---
+        # ==============================================================================
+        logger.info(f"Video contains {total_clips} scenes. Using Chunked Assembly (CHUNK_SIZE={CHUNK_SIZE}) to prevent OOM.")
+        
+        estimated_duration = total_clips * 5.0
+        beats = detect_audio_beats(audio_path, estimated_duration) if audio_path else []
+        
+        chunk_files = []
+        
+        for chunk_idx in range(0, total_clips, CHUNK_SIZE):
+            chunk_paths = video_paths[chunk_idx : chunk_idx + CHUNK_SIZE]
+            chunk_narrs = narrations[chunk_idx : chunk_idx + CHUNK_SIZE]
             
-            # Append final processed clip
-            clips.append(clip)
+            chunk_clips = []
+            chunk_tts_audio_clips = []
+            cumulative_time = 0.0
             
-            # Position the narration audio clip
-            if tts_clip:
-                tts_clip = tts_clip.with_start(cumulative_time)
-                tts_audio_clips.append(tts_clip)
+            logger.info(f"--- Processing Chunk {chunk_idx//CHUNK_SIZE + 1} ({len(chunk_paths)} clips) ---")
+            for i, path in enumerate(chunk_paths):
+                global_i = chunk_idx + i
+                c = VideoFileClip(path)
+                
+                # Resize
+                if c.w != target_w or c.h != target_h:
+                    scale = max(target_w / c.w, target_h / c.h)
+                    new_w = int(round(c.w * scale))
+                    new_h = int(round(c.h * scale))
+                    if new_w % 2 != 0: new_w += 1
+                    if new_h % 2 != 0: new_h += 1
+                    c = c.with_effects([
+                        Resize(new_size=(new_w, new_h)),
+                        Crop(x_center=new_w/2, y_center=new_h/2, width=target_w, height=target_h)
+                    ])
                     
-            # Update cumulative time based on the actual duration of the final clip
-            # Trừ đi 0.5s (transition fade) để narration đoạn sau khớp đúng lúc bắt đầu scene mới
-            cumulative_time += clip.duration - 0.5
-        
-        # 3. Concatenate video clips with crossfade transitions
-        clips_with_fade = [clips[0]]
-        for c in clips[1:]:
-            clips_with_fade.append(c.with_effects([CrossFadeIn(0.5)]))
+                natural_duration = c.duration
+                target_end_time = cumulative_time + natural_duration + (chunk_idx * 5.0)
+                
+                # Beat matching
+                if global_i < total_clips - 1 and beats:
+                    closest_beat = min(beats, key=lambda b: abs(b - target_end_time))
+                    if abs(closest_beat - target_end_time) <= 1.0:
+                        new_duration = closest_beat - (cumulative_time + (chunk_idx * 5.0))
+                        if new_duration > 0.5:
+                            c = c.subclipped(0, new_duration)
+                            
+                # TTS
+                narration_text = chunk_narrs[i] if i < len(chunk_narrs) else ""
+                tts_duration = 0.0
+                tts_clip = None
+                if narration_text.strip():
+                    try:
+                        temp_tts_path = f"temp_tts_{global_i}_{os.getpid()}.mp3"
+                        try:
+                            import edge_tts, asyncio, time
+                            async def _gen_edge_tts():
+                                communicate = edge_tts.Communicate(narration_text.strip(), "vi-VN-HoaiMyNeural")
+                                await communicate.save(temp_tts_path)
+                            for attempt in range(3):
+                                try:
+                                    asyncio.run(_gen_edge_tts())
+                                    break
+                                except Exception:
+                                    if attempt < 2: time.sleep(1.5)
+                        except Exception:
+                            tts = gTTS(text=narration_text.strip(), lang="vi")
+                            tts.save(temp_tts_path)
+                            
+                        temp_files.append(temp_tts_path)
+                        tts_clip = AudioFileClip(temp_tts_path)
+                        tts_duration = tts_clip.duration
+                    except Exception as tts_err:
+                        logger.error(f"Failed TTS for chunk {chunk_idx} scene {i}: {tts_err}")
+                        
+                # Speed stretch
+                if tts_duration > c.duration:
+                    factor = c.duration / tts_duration
+                    if factor >= 0.5:
+                        c = c.with_effects([MultiplySpeed(factor)])
+                    else:
+                        c = c.with_effects([MultiplySpeed(0.5)])
+                        freeze_duration = tts_duration - c.duration
+                        last_frame = c.get_frame(c.duration - 0.05)
+                        fps = c.fps or 24
+                        freeze_clip = ImageClip(last_frame).with_duration(freeze_duration).with_fps(fps)
+                        c = concatenate_videoclips([c, freeze_clip])
+                        
+                chunk_clips.append(c)
+                if tts_clip:
+                    tts_clip = tts_clip.with_start(cumulative_time)
+                    chunk_tts_audio_clips.append(tts_clip)
+                    
+                cumulative_time += c.duration - 0.5
+                
+            # Compose chunk
+            clips_with_fade = [chunk_clips[0]]
+            for c in chunk_clips[1:]:
+                clips_with_fade.append(c.with_effects([CrossFadeIn(0.5)]))
+                
+            chunk_final = concatenate_videoclips(clips_with_fade, padding=-0.5, method="compose")
             
-        final_clip = concatenate_videoclips(clips_with_fade, padding=-0.5, method="compose")
-        video_duration = final_clip.duration
+            if chunk_tts_audio_clips:
+                chunk_audio = CompositeAudioClip(chunk_tts_audio_clips)
+                chunk_final = chunk_final.with_audio(chunk_audio)
+                
+            chunk_out = f"temp_chunk_{chunk_idx}_{os.getpid()}.mp4"
+            logger_obj = DBProgressBarLogger(node_id) if node_id is not None else None
+            
+            logger.info(f"Writing Chunk {chunk_idx//CHUNK_SIZE + 1} to {chunk_out}")
+            chunk_final.write_videofile(
+                chunk_out,
+                codec="libx264",
+                audio_codec="aac",
+                temp_audiofile=f"temp-audio-chunk-{chunk_idx}.m4a",
+                remove_temp=True,
+                logger=logger_obj
+            )
+            
+            chunk_files.append(chunk_out)
+            temp_files.append(chunk_out)
+            
+            # Giải phóng RAM cho Cụm hiện tại
+            chunk_final.close()
+            for c in chunk_clips: c.close()
+            for t in chunk_tts_audio_clips: t.close()
+            logger.info(f"--- Cleared RAM for Chunk {chunk_idx//CHUNK_SIZE + 1} ---")
+            
+        # MASTER STITCH
+        logger.info(f"All {len(chunk_files)} chunks created. Starting Master Stitch.")
+        master_clips = [VideoFileClip(p) for p in chunk_files]
+        master_with_fade = [master_clips[0]]
+        for c in master_clips[1:]:
+            master_with_fade.append(c.with_effects([CrossFadeIn(0.5)]))
+            
+        final_master = concatenate_videoclips(master_with_fade, padding=-0.5, method="compose")
+        video_duration = final_master.duration
         
-        # 4. Mix audio components (Background Music at 20% volume + TTS Voiceover)
-        audio_components = []
-        
-        # Thêm nhạc nền nếu có (giảm âm lượng xuống 20% để giọng thoại rõ ràng)
         if audio_path:
             bg_music = AudioFileClip(audio_path)
             if bg_music.duration > video_duration:
                 bg_music = bg_music.subclipped(0, video_duration)
             else:
                 bg_music = bg_music.with_duration(video_duration)
-            
+                
             bg_music = bg_music.volumex(0.2)
-            audio_components.append(bg_music)
             
-        # Thêm toàn bộ danh sách giọng thuyết minh AI
-        if tts_audio_clips:
-            audio_components.extend(tts_audio_clips)
-            
-        # Gộp tất cả âm thanh lại
-        if audio_components:
-            final_audio = CompositeAudioClip(audio_components)
-            final_clip = final_clip.with_audio(final_audio)
-            
-        # 5. Write output file
-        logger_obj = DBProgressBarLogger(node_id) if node_id is not None else None
-        final_clip.write_videofile(
+            if final_master.audio:
+                final_audio = CompositeAudioClip([final_master.audio, bg_music])
+                final_master = final_master.with_audio(final_audio)
+            else:
+                final_master = final_master.with_audio(bg_music)
+                
+        logger.info(f"Writing final master video to {output_path}")
+        final_master.write_videofile(
             output_path,
             codec="libx264",
             audio_codec="aac",
-            temp_audiofile="temp-audio.m4a",
+            temp_audiofile="temp-audio-master.m4a",
             remove_temp=True,
             logger=logger_obj
         )
         
-        # Close to free file handles
-        final_clip.close()
+        final_master.close()
+        for c in master_clips: c.close()
+        logger.info("Master Stitch complete. Chunked Assembly finished successfully!")
         
     finally:
+        # Cleanup temporary files (TTS mp3 and chunk mp4)
+        for tf in temp_files:
+            try:
+                if os.path.exists(tf):
+                    os.remove(tf)
+            except Exception as cleanup_err:
+                logger.error(f"Failed to cleanup temp file {tf}: {cleanup_err}")
         # Giải phóng tài nguyên
         for c in clips:
             try:
@@ -379,15 +535,6 @@ def _run_moviepy_assembly(
                 ac.close()
             except Exception:
                 pass
-        # Xóa các file nhạc thuyết minh tạm thời
-        for temp_file in temp_files:
-            try:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-            except Exception as clean_err:
-                logger.error(f"Failed to clean up temp TTS file {temp_file}: {clean_err}")
-                c.close()
-            except Exception:
                 pass
 
 
