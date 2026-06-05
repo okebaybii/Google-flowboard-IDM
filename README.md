@@ -132,20 +132,15 @@ FB_PAGE__ACCESS_TOKEN=nhap_token_truy_cap_permanent_cua_trang
 
 ### Các bước khởi chạy dự án
 
-Dự án đi kèm với công cụ `Makefile` để cài đặt và chạy nhanh chỉ với 3 lệnh:
+Dự án đi kèm với các tệp lệnh tự động để cài đặt và chạy nhanh trên Windows:
 
 1. **Cài đặt thư viện & môi trường:**
-   ```bash
-   make install
-   ```
-2. **Khởi chạy Backend Agent (FastAPI - Port 8101):**
-   ```bash
-   make agent
-   ```
-3. **Khởi chạy Frontend Dev Server (React/Vite - Port 1234):**
-   ```bash
-   make frontend
-   ```
+   - Nhấn đúp chuột vào file `install-all.bat` (hoặc chạy lệnh `install-all.bat` trên CMD).
+2. **Khởi chạy hệ thống (Backend & Frontend):**
+   - Nhấn đúp chuột vào file `start-all.bat`.
+   - Chọn chế độ chạy ẩn (background) hoặc hiện cửa sổ CMD.
+
+*(Đối với macOS/Linux, bạn có thể dùng lệnh `make install`, `make agent`, và `make frontend`).*
 
 *Sau khi chạy 3 bước trên:*
 1. Mở Chrome, truy cập `chrome://extensions/`, bật chế độ **Developer Mode**, chọn **Load unpacked** và dẫn tới thư mục `extension/` trong dự án.
