@@ -285,3 +285,38 @@ async def ext_callback(
 
     matched = flow_client.resolve_callback(payload)
     return {"ok": matched}
+
+
+# --- Serve Frontend (for standalone EXE build) ---
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import sys
+import os
+
+def get_frontend_dist_path():
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, "frontend_dist")
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "frontend", "dist")
+
+frontend_dist = get_frontend_dist_path()
+if os.path.exists(frontend_dist) and os.path.exists(os.path.join(frontend_dist, "index.html")):
+    # Serve assets directory statically
+    assets_dir = os.path.join(frontend_dist, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+        
+    # Additional static files at root level (vite/react may output some)
+    for root_file in ["vite.svg", "favicon.ico"]:
+        file_path = os.path.join(frontend_dist, root_file)
+        if os.path.exists(file_path):
+            @app.get(f"/{root_file}", include_in_schema=False)
+            def _serve_root_file(file=file_path):
+                return FileResponse(file)
+
+    @app.get("/{catchall:path}", include_in_schema=False)
+    def serve_frontend_catchall(catchall: str):
+        # Allow API calls to fail naturally with 404 instead of returning index.html
+        if catchall.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API route not found")
+        # For everything else, serve index.html to allow React Router to handle the URL
+        return FileResponse(os.path.join(frontend_dist, "index.html"))

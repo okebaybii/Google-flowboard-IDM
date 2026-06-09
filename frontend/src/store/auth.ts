@@ -130,7 +130,17 @@ export const useAuthStore = create<AuthState>((set, get) => {
                 set({ user: null, token: null, loading: false });
               }
             } catch (err: any) {
-              set({ error: err.message, loading: false });
+              if (err.code === "auth/user-disabled" || (err.message && err.message.includes("user-disabled"))) {
+                await signOut(firebaseAuth);
+                set({ 
+                  user: null, 
+                  token: null, 
+                  loading: false, 
+                  error: "Tài khoản đã bị khóa hoặc xóa. Vui lòng đăng nhập lại." 
+                });
+              } else {
+                set({ error: err.message, loading: false });
+              }
             }
           } else {
             set({ user: null, token: null, loading: false, sessionConflict: false });
@@ -284,6 +294,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
       if (hasRealFirebase && firebaseAuth) {
         try {
           const provider = new GoogleAuthProvider();
+          provider.setCustomParameters({ prompt: 'select_account' });
           const cred = await signInWithPopup(firebaseAuth, provider);
           const token = await cred.user.getIdToken();
           const backendData = await registerSessionOnBackend(token);
@@ -306,7 +317,11 @@ export const useAuthStore = create<AuthState>((set, get) => {
             set({ user: null, token: null, loading: false });
           }
         } catch (err: any) {
-          set({ error: err.message, loading: false });
+          if (err.code === "auth/user-disabled" || (err.message && err.message.includes("user-disabled"))) {
+            set({ error: "Tài khoản Google này đã bị khóa trên hệ thống. Vui lòng thử lại và chọn tài khoản khác.", loading: false });
+          } else {
+            set({ error: err.message, loading: false });
+          }
         }
       } else {
         // Mock Google Login

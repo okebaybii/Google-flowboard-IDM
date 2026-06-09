@@ -101,6 +101,7 @@ export interface FlowboardNodeData extends Record<string, unknown> {
   // missing (true for fresh nodes + legacy pre-1.2.15 nodes whose
   // multi-shot data is now ignored).
   storyboardGrid?: StoryboardGrid;
+  sampleVideoUrl?: string;
 }
 
 export type FlowNode = Node<FlowboardNodeData>;
@@ -295,6 +296,7 @@ export const useBoardStore = create<BoardState>((set, get) => ({
           charGender: n.data["charGender"] as string | undefined,
           storyboardGrid: n.data["storyboardGrid"] as StoryboardGrid | undefined,
           assemblyProgress: n.data["assemblyProgress"] as number | undefined,
+          sampleVideoUrl: n.data["sampleVideoUrl"] as string | undefined,
         },
       }));
 
@@ -443,6 +445,7 @@ export const useBoardStore = create<BoardState>((set, get) => ({
           batchCameraMode: n.data["batchCameraMode"] as string | undefined,
           retryFailedClips: n.data["retryFailedClips"] as boolean | undefined,
           assemblyProgress: n.data["assemblyProgress"] as number | undefined,
+          sampleVideoUrl: n.data["sampleVideoUrl"] as string | undefined,
         },
       }));
       const edges: Edge[] = detail.edges.map(edgeFromDto);

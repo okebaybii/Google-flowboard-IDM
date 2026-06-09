@@ -180,6 +180,58 @@ def _is_request_canceled(rid: Optional[int]) -> bool:
         return req.status == "canceled"
 
 
+async def _extract_last_frame_and_upload(video_media_id: str, project_id: str) -> str:
+    """Extracts the last frame of a video asset and uploads it to Flow as an image."""
+    from sqlmodel import select
+    from flowboard.db.models import Asset
+    from flowboard.services.flow_sdk import get_flow_sdk, _extract_uploaded_media_id
+    import subprocess
+    import tempfile
+    import os
+    import base64
+    
+    with get_session() as s:
+        asset = s.exec(select(Asset).where(Asset.uuid_media_id == video_media_id)).first()
+        if not asset or asset.kind != "video" or not asset.local_path:
+            return video_media_id  # Not a video or no local path, return original
+
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_out:
+        out_path = tmp_out.name
+    
+    try:
+        cmd = [
+            "ffmpeg", "-y", "-sseof", "-0.1", "-i", asset.local_path,
+            "-update", "1", "-q:v", "2", out_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        
+        with open(out_path, "rb") as f:
+            b64_data = base64.b64encode(f.read()).decode("utf-8")
+            
+        sdk = get_flow_sdk()
+        resp = await sdk.upload_image(
+            b64_data=b64_data,
+            project_id=project_id,
+            mime_type="image/jpeg",
+            file_name=f"extend_{video_media_id}.jpg"
+        )
+        if "error" in resp:
+            logger.error(f"Failed to upload extracted frame: {resp['error']}")
+            return video_media_id
+            
+        new_media_id = _extract_uploaded_media_id(resp)
+        if not new_media_id:
+            return video_media_id
+            
+        return new_media_id
+    except Exception as e:
+        logger.error(f"Failed to extract/upload last frame: {e}")
+        return video_media_id
+    finally:
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
 async def _handle_gen_video(params: dict) -> tuple[dict, Optional[str]]:
     from flowboard.services.flow_sdk import is_valid_project_id
 
@@ -206,6 +258,17 @@ async def _handle_gen_video(params: dict) -> tuple[dict, Optional[str]]:
     project_id = project_id.strip()
     if not is_valid_project_id(project_id):
         return {}, "invalid_project_id"
+    
+    # Extract last frame if start_media_id points to a video
+    if isinstance(start_media_id, str) and start_media_id.strip():
+        start_media_id = await _extract_last_frame_and_upload(start_media_id.strip(), project_id)
+        
+    if start_media_ids:
+        new_starts = []
+        for mid in start_media_ids:
+            new_starts.append(await _extract_last_frame_and_upload(mid, project_id))
+        start_media_ids = new_starts
+
     # Either a single start_media_id OR a non-empty start_media_ids list.
     if start_media_ids is None and (
         not isinstance(start_media_id, str) or not start_media_id.strip()

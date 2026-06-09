@@ -8,7 +8,10 @@ from flowboard.db import get_session
 from flowboard.db.models import Asset, Board, Edge, Node, Request
 from flowboard.short_id import generate_unique_short_id
 
+import logging
+
 router = APIRouter(prefix="/api/nodes", tags=["nodes"])
+logger = logging.getLogger(__name__)
 
 NodeType = Literal[
     "character",
@@ -190,6 +193,7 @@ def delete_node(node_id: int):
 
 class GenerateStoryRequest(BaseModel):
     prompt: Optional[str] = None
+    sampleVideoUrl: Optional[str] = None
 
 
 import json
@@ -218,6 +222,26 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
         if provider is None or not await provider.is_available():
             raise HTTPException(503, f"Configured LLM provider '{provider_name}' is not available. Please verify Settings.")
             
+        # Gather upstream reference text to enforce character/style consistency
+        upstream_prompts = []
+        incoming_edges = s.exec(select(Edge).where(Edge.target_id == node_id)).all()
+        for e in incoming_edges:
+            sn = s.get(Node, e.source_id)
+            if sn and sn.type in ("image", "character", "prompt", "Storyboard", "style_preset"):
+                p = sn.data.get("prompt", "").strip()
+                if not p:
+                    p = sn.data.get("aiBrief", "").strip()
+                if p and p not in upstream_prompts:
+                    upstream_prompts.append(p)
+                    
+        reference_context = ""
+        if upstream_prompts:
+            reference_context = (
+                "CRITICAL: The user has provided the following reference character/style descriptions:\n"
+                + "\n".join(f"- {p}" for p in upstream_prompts) + "\n\n"
+                "You MUST strictly incorporate and preserve these exact character descriptions, clothing, and visual styles in ALL your generated `image_prompt`s. Do not invent new character appearances.\n\n"
+            )
+
     # Call the LLM provider
     system_prompt = (
         "You are a master cinematic filmmaker and AI video story writer. "
@@ -230,10 +254,63 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
         "Your output MUST be a valid JSON array of objects. Do not include any markdown formatting (like ```json), explanations, or text outside the JSON array."
     )
     
-    full_prompt = f"{system_prompt}\n\nSTORY SCRIPT CONCEPT:\n{prompt_text}\n\nJSON OUTPUT:"
+    full_prompt = f"{system_prompt}\n\n{reference_context}STORY SCRIPT CONCEPT:\n{prompt_text}\n\nJSON OUTPUT:"
+
+    attachments = []
+    sample_video_url = body.sampleVideoUrl or node.data.get("sampleVideoUrl")
+    temp_dir = None
+    
+    if sample_video_url and str(sample_video_url).strip():
+        import tempfile
+        import os
+        import cv2
+        import yt_dlp
+        
+        temp_dir = tempfile.mkdtemp(prefix="flowboard_vid_")
+        try:
+            ydl_opts = {
+                'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
+                'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+                'quiet': True,
+                'no_warnings': True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(sample_video_url, download=True)
+                ext = info.get('ext', 'mp4')
+                vid_path = os.path.join(temp_dir, f'video.{ext}')
+                
+            # Extract frames
+            cap = cv2.VideoCapture(vid_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = total_frames / fps if fps > 0 else 0
+            
+            # Target ~8 frames total regardless of length to stay under MAX_ATTACHMENTS=10
+            if total_frames > 0:
+                step = max(1, total_frames // 8)
+                frame_count = 0
+                saved_count = 0
+                while cap.isOpened() and saved_count < 8:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    if frame_count % step == 0:
+                        frame_path = os.path.join(temp_dir, f"frame_{saved_count}.jpg")
+                        cv2.imwrite(frame_path, frame)
+                        attachments.append(frame_path)
+                        saved_count += 1
+                    frame_count += 1
+            cap.release()
+            
+            full_prompt = f"{system_prompt}\n\n{reference_context}I have also attached keyframes from a reference video. Use this video as the primary inspiration for the storytelling, visual style, and sequence of events.\n\nSTORY SCRIPT CONCEPT/PROMPT:\n{prompt_text}\n\nJSON OUTPUT:"
+            
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to process sample video: {e}")
+            raise HTTPException(400, f"Không thể tải video mẫu (có thể do link sai, video riêng tư, hoặc nền tảng chặn tải). Chi tiết lỗi: {e}")
     
     try:
-        raw_result = await provider.run(full_prompt, timeout=60.0)
+        raw_result = await provider.run(full_prompt, attachments=attachments, timeout=120.0)
         # Parse JSON
         clean_json = raw_result.strip()
         if clean_json.startswith("```json"):
@@ -247,8 +324,10 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
             raise ValueError("LLM output is not a JSON array")
             
     except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise exc
         logger.error(f"LLM story generation failed: {exc}")
-        raise HTTPException(500, f"AI generation failed to produce valid scenes: {str(exc)}")
+        raise HTTPException(400, f"Lỗi từ AI (Gemini): {str(exc)}")
         
     # Now spawn nodes in DB
     spawned_nodes = []
@@ -334,47 +413,44 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
             base_x = node.x
             base_y = node.y
             
-            prev_img_node = None
+            prev_vid_node = None
             for i, scene in enumerate(scenes):
-                # Spawn image node
-                img_short_id = generate_unique_short_id(s, board_id)
-                img_node = Node(
-                    board_id=board_id,
-                    short_id=img_short_id,
-                    type="image",
-                    x=base_x + (i + 1) * 320,
-                    y=base_y - 100,
-                    data={
-                        "title": scene.get("title", f"Cảnh {i+1} - Ảnh"),
-                        "prompt": scene.get("image_prompt", ""),
-                        "aspectRatio": "IMAGE_ASPECT_RATIO_LANDSCAPE"
-                    },
-                    status="idle"
-                )
-                s.add(img_node)
-                s.flush()
-                
-                # Auto-connect all upstream reference nodes to the newly spawned image node
-                for ref_id in upstream_refs:
-                    edge_ref = Edge(
+                # Only spawn the base image for the very first scene
+                if i == 0:
+                    img_short_id = generate_unique_short_id(s, board_id)
+                    img_node = Node(
                         board_id=board_id,
-                        source_id=ref_id,
-                        target_id=img_node.id,
-                        kind="ref"
+                        short_id=img_short_id,
+                        type="image",
+                        x=base_x + 320,
+                        y=base_y - 100,
+                        data={
+                            "title": scene.get("title", f"Cảnh {i+1} - Ảnh"),
+                            "prompt": scene.get("image_prompt", ""),
+                            "aspectRatio": "IMAGE_ASPECT_RATIO_LANDSCAPE"
+                        },
+                        status="idle"
                     )
-                    s.add(edge_ref)
+                    s.add(img_node)
+                    s.flush()
+                    
+                    # Auto-connect all upstream reference nodes to the newly spawned image node
+                    for ref_id in upstream_refs:
+                        edge_ref = Edge(
+                            board_id=board_id,
+                            source_id=ref_id,
+                            target_id=img_node.id,
+                            kind="ref"
+                        )
+                        s.add(edge_ref)
+                        
+                    spawned_nodes.append(img_node)
+                    base_img_node = img_node
                 
-                # Chain from previous image node for scenery/visual consistency
-                if prev_img_node:
-                    edge_img_chain = Edge(
-                        board_id=board_id,
-                        source_id=prev_img_node.id,
-                        target_id=img_node.id,
-                        kind="ref"
-                    )
-                    s.add(edge_img_chain)
-                
-                prev_img_node = img_node
+                # Merge prompts so the video generation retains visual context
+                combined_prompt = scene.get("image_prompt", "")
+                if scene.get("video_prompt"):
+                    combined_prompt += f". {scene.get('video_prompt')}"
                 
                 # Spawn video node
                 vid_short_id = generate_unique_short_id(s, board_id)
@@ -386,7 +462,7 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                     y=base_y + 120,
                     data={
                         "title": scene.get("title", f"Cảnh {i+1} - Clip"),
-                        "prompt": scene.get("video_prompt", ""),
+                        "prompt": combined_prompt,
                         "narration": scene.get("narration", ""),
                         "aspectRatio": "VIDEO_ASPECT_RATIO_LANDSCAPE"
                     },
@@ -395,21 +471,34 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                 s.add(vid_node)
                 s.flush()
                 
-                # Connect image to video
-                edge1 = Edge(
-                    board_id=board_id,
-                    source_id=img_node.id,
-                    target_id=vid_node.id,
-                    kind="ref"
-                )
-                s.add(edge1)
+                if i == 0:
+                    # First video connects to the base image
+                    edge1 = Edge(
+                        board_id=board_id,
+                        source_id=base_img_node.id,
+                        target_id=vid_node.id,
+                        kind="ref"
+                    )
+                    s.add(edge1)
+                else:
+                    # Subsequent videos chain to the previous video for seamless continuity
+                    edge_chain = Edge(
+                        board_id=board_id,
+                        source_id=prev_vid_node.id,
+                        target_id=vid_node.id,
+                        kind="ref"
+                    )
+                    s.add(edge_chain)
                 
+                prev_vid_node = vid_node
+                spawned_nodes.append(vid_node)
                 
                 # Connect video to assembly
                 if assembly_node_id:
                     edge2 = Edge(
                         board_id=board_id,
                         source_id=vid_node.id,
+
                         target_id=assembly_node_id,
                         kind="ref"
                     )
@@ -436,5 +525,7 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                 node.status = "error"
                 s.add(node)
                 s.commit()
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(500, f"Error spawning storyboard nodes: {str(e)}")
 

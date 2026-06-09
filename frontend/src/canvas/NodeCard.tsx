@@ -1118,6 +1118,56 @@ function VideoBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
           }}
         />
       </div>
+
+      {/* Extend Video Button */}
+      {data.mediaId && data.status === "done" && (
+        <button
+          type="button"
+          onClick={async (e) => {
+            e.stopPropagation();
+            const store = useBoardStore.getState();
+            const currentNode = store.nodes.find((n) => n.id === rfId);
+            if (!currentNode) return;
+            
+            const newPos = { x: currentNode.position.x + 350, y: currentNode.position.y };
+            const newId = await store.addNodeOfType("video", newPos);
+            
+            if (newId) {
+              await store.addEdgeFromConnection(rfId, newId);
+              
+              const inheritedData = {
+                prompt: data.prompt || "",
+                aspectRatio: data.aspectRatio || "16:9",
+                seed: data.seed,
+                activeStyleId: data.activeStyleId,
+              };
+              
+              store.updateNodeData(newId, inheritedData);
+              const dbId = parseInt(newId, 10);
+              if (!isNaN(dbId)) {
+                patchNode(dbId, { data: inheritedData }).catch(console.error);
+              }
+              
+              useGenerationStore.getState().openGenerationDialog(newId, inheritedData.prompt);
+            }
+          }}
+          style={{
+            marginTop: 6,
+            width: "100%",
+            background: "rgba(124, 92, 255, 0.15)",
+            border: "1px dashed var(--accent)",
+            color: "var(--accent)",
+            padding: "4px 0",
+            borderRadius: 4,
+            fontSize: 10,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+          title="Tạo cảnh tiếp nối (giữ nguyên style, nhân vật, nối từ frame cuối)"
+        >
+          + Extend (+8s)
+        </button>
+      )}
     </div>
   );
 }
@@ -1821,24 +1871,27 @@ function StylePresetBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
 
 function StoryScriptBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
   const prompt = (data.prompt as string) || "";
+  const sampleVideoUrl = (data.sampleVideoUrl as string) || "";
   const [localPrompt, setLocalPrompt] = useState(prompt);
+  const [localSampleVideoUrl, setLocalSampleVideoUrl] = useState(sampleVideoUrl);
   const [generating, setGenerating] = useState(data.status === "running");
 
   useEffect(() => {
     setLocalPrompt(prompt);
-  }, [prompt]);
+    setLocalSampleVideoUrl(sampleVideoUrl);
+  }, [prompt, sampleVideoUrl]);
 
   const handleBlur = () => {
-    useBoardStore.getState().updateNodeData(rfId, { prompt: localPrompt });
+    useBoardStore.getState().updateNodeData(rfId, { prompt: localPrompt, sampleVideoUrl: localSampleVideoUrl });
     const dbId = parseInt(rfId, 10);
     if (!isNaN(dbId)) {
-      void patchNode(dbId, { data: { prompt: localPrompt } });
+      void patchNode(dbId, { data: { prompt: localPrompt, sampleVideoUrl: localSampleVideoUrl } });
     }
   };
 
   const handleGenerate = async () => {
-    if (!localPrompt.trim()) {
-      alert("Vui lòng nhập nội dung kịch bản / cốt truyện.");
+    if (!localPrompt.trim() && !localSampleVideoUrl.trim()) {
+      alert("Vui lòng nhập nội dung kịch bản hoặc link video mẫu.");
       return;
     }
 
@@ -1849,7 +1902,7 @@ function StoryScriptBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
       const dbId = parseInt(rfId, 10);
       await api(`/api/nodes/story-script/${dbId}/generate`, {
         method: "POST",
-        body: JSON.stringify({ prompt: localPrompt }),
+        body: JSON.stringify({ prompt: localPrompt, sampleVideoUrl: localSampleVideoUrl }),
       });
       
       // Update state to done
@@ -1868,9 +1921,27 @@ function StoryScriptBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
 
   return (
     <div className="node-body story-script-body" style={{ display: "flex", flexDirection: "column", gap: 8, height: "100%" }}>
+      <input
+        type="text"
+        placeholder="Link video mẫu (tùy chọn)..."
+        value={localSampleVideoUrl}
+        onChange={(e) => setLocalSampleVideoUrl(e.target.value)}
+        onBlur={handleBlur}
+        disabled={generating}
+        style={{
+          width: "100%",
+          background: "var(--panel-high)",
+          border: "1px solid var(--border)",
+          borderRadius: 6,
+          color: "var(--text)",
+          padding: "6px 8px",
+          fontSize: 11,
+          boxSizing: "border-box"
+        }}
+      />
       <textarea
         className="node-card__textarea nodrag"
-        placeholder="Nhập cốt truyện hoặc ý tưởng phim..."
+        placeholder="Nhập cốt truyện hoặc ý tưởng phim (tùy chọn nếu có video mẫu)..."
         value={localPrompt}
         onChange={(e) => setLocalPrompt(e.target.value)}
         onBlur={handleBlur}
@@ -1896,7 +1967,7 @@ function StoryScriptBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
           e.stopPropagation();
           handleGenerate();
         }}
-        disabled={generating || !localPrompt.trim()}
+        disabled={generating || (!localPrompt.trim() && !localSampleVideoUrl.trim())}
         style={{
           background: "linear-gradient(135deg, #7c5cff 0%, #a05cff 100%)",
           color: "#fff",

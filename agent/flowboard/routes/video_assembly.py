@@ -1010,6 +1010,8 @@ async def run_batch_generation(
                         pn = session.get(Node, pe.source_id)
                         if pn and pn.type in ("prompt", "image", "Storyboard"):
                             pn_text = pn.data.get("prompt", "").strip()
+                            if not pn_text:
+                                pn_text = pn.data.get("aiBrief", "").strip()
                             if pn.type in ("image", "Storyboard") and node.type in ("image", "Storyboard"):
                                 pass  # Do not inherit previous image prompt to prevent exponential growth
                             else:
@@ -1105,7 +1107,7 @@ async def run_batch_generation(
                             seen_start_ids = set()
                             for edge in parent_edges:
                                 p_node = session.get(Node, edge.source_id)
-                                if p_node and p_node.type in ("image", "Storyboard"):
+                                if p_node and p_node.type in ("image", "Storyboard", "video"):
                                     mid = _select_node_media_id(p_node, edge)
                                     if mid and mid not in seen_start_ids:
                                         start_media_ids.append(mid)
