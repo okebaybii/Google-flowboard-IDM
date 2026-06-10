@@ -89,6 +89,11 @@ interface GenerationState {
     opts: { prompt: string; refMediaIds?: string[]; aspectRatio?: string },
   ): Promise<void>;
 
+  upscaleVideo(
+    rfId: string,
+    opts: { resolution?: string }
+  ): Promise<void>;
+
   cancelGeneration(rfId: string): void;
   clearError(): void;
 }
@@ -722,6 +727,119 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
       }
     };
     setTimeout(poll, 800);
+  },
+
+  async upscaleVideo(rfId, opts) {
+    const projectId = await get().ensureProjectId();
+    if (projectId === null) return;
+
+    const node = useBoardStore.getState().nodes.find((n) => n.id === rfId);
+    const sourceMediaId = node?.data.mediaId;
+    if (!sourceMediaId) {
+      set({ error: "no source video to upscale" });
+      return;
+    }
+
+    const existing = get().active[rfId];
+    if (existing && existing.timerId !== null) clearTimeout(existing.timerId);
+
+    useBoardStore.getState().updateNodeData(rfId, {
+      status: "queued",
+      error: undefined,
+    });
+
+    const nodeDbId = parseInt(rfId, 10);
+    let reqDto;
+    try {
+      reqDto = await createRequest({
+        type: "upscale_video",
+        node_id: isNaN(nodeDbId) ? undefined : nodeDbId,
+        params: {
+          project_id: projectId,
+          media_id: sourceMediaId,
+          aspect_ratio: node?.data.aspectRatio ?? "VIDEO_ASPECT_RATIO_LANDSCAPE",
+          paygate_tier: get().paygateTier ?? "PAYGATE_TIER_ONE",
+          resolution: opts.resolution ?? "VIDEO_RESOLUTION_4K",
+        },
+      });
+    } catch (err) {
+      useBoardStore.getState().updateNodeData(rfId, {
+        status: "error",
+        error: err instanceof Error ? err.message : "upscale failed",
+      });
+      set({ error: err instanceof Error ? err.message : "upscale failed" });
+      return;
+    }
+
+    const requestId = reqDto.id;
+    set((s) => ({
+      active: { ...s.active, [rfId]: { requestId, timerId: null } },
+    }));
+
+    const poll = async () => {
+      try {
+        const req = await getRequest(requestId);
+        if (req.status === "running" || req.status === "queued") {
+          useBoardStore.getState().updateNodeData(rfId, { status: req.status });
+          const t = setTimeout(poll, 2000);
+          set((s) => ({
+            active: { ...s.active, [rfId]: { requestId, timerId: t } },
+          }));
+          return;
+        }
+        if (req.status === "done") {
+          const mediaIds = (req.result["media_ids"] as string[] | undefined) ?? [];
+          const mediaId = mediaIds[0];
+          useBoardStore.getState().updateNodeData(rfId, {
+            status: "done",
+            mediaId: mediaId ?? sourceMediaId,
+            mediaIds: mediaId ? mediaIds : node?.data.mediaIds,
+            renderedAt: new Date().toISOString(),
+          });
+          const dbId = parseInt(rfId, 10);
+          if (!isNaN(dbId) && mediaId) {
+            patchNode(dbId, {
+              data: {
+                mediaId,
+                mediaIds,
+                renderedAt: new Date().toISOString(),
+              },
+            }).catch(() => {});
+          }
+          set((s) => {
+            const next = { ...s.active };
+            delete next[rfId];
+            return { active: next };
+          });
+          return;
+        }
+        if (req.status === "canceled") {
+          useBoardStore.getState().updateNodeData(rfId, { status: "idle" });
+          set((s) => {
+            const next = { ...s.active };
+            delete next[rfId];
+            return { active: next };
+          });
+          return;
+        }
+        const errMsg = req.error ?? "upscale failed";
+        useBoardStore.getState().updateNodeData(rfId, {
+          status: "error",
+          error: errMsg,
+        });
+        set((s) => {
+          const next = { ...s.active };
+          delete next[rfId];
+          return { active: next, error: errMsg };
+        });
+      } catch (err) {
+        const t = setTimeout(poll, 2000);
+        set((s) => ({
+          active: { ...s.active, [rfId]: { requestId, timerId: t } },
+        }));
+      }
+    };
+    setTimeout(poll, 1000);
   },
 
   cancelGeneration(rfId) {

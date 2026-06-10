@@ -1,3 +1,4 @@
+from .ffmpeg_assembly import _run_ffmpeg_assembly
 """Video Assembly routes for merging video clips and adding background audio.
 
 Concatenates multiple upstream video node clips and overlays an uploaded audio file.
@@ -641,8 +642,8 @@ async def _assemble_videos_impl(
             session.refresh(node)
             
         # 7. Run compilation in separate thread (passing aligned narrations and node_id)
-        await asyncio.to_thread(
-            _run_moviepy_assembly,
+        # 7. Run compilation
+        await _run_ffmpeg_assembly(
             video_paths,
             narrations,
             audio_path,
@@ -1146,14 +1147,17 @@ async def run_batch_generation(
                             }
                             if veo_ref_ids:
                                 params["ref_media_ids"] = veo_ref_ids
-                            if len(start_media_ids) > 1:
+                            if len(start_media_ids) == 2:
+                                params["start_media_id"] = start_media_ids[0]
+                                params["end_media_id"] = start_media_ids[1]
+                            elif len(start_media_ids) > 2:
                                 params["start_media_ids"] = start_media_ids
                             else:
                                 params["start_media_id"] = start_media_ids[0]
                             req_type = "gen_video"
 
-                # We try generating the node with auto-retry up to 2 attempts, or indefinitely if retry_failed is True
-                max_attempts = 9999 if retry_failed else 2
+                # Retry indefinitely (up to 9999 times) as requested by user
+                max_attempts = 9999
                 settled = None
                 error_message = "generation failed"
                 success = False

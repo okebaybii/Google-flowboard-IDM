@@ -1205,6 +1205,32 @@ function VideoBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
           + Extend (+8s)
         </button>
       )}
+
+      {/* Upscale 4K Button */}
+      {data.mediaId && data.status === "done" && (
+        <button
+          type="button"
+          onClick={async (e) => {
+            e.stopPropagation();
+            useGenerationStore.getState().upscaleVideo(rfId, { resolution: "VIDEO_RESOLUTION_4K" });
+          }}
+          disabled={isProcessing}
+          style={{
+            marginTop: 4,
+            width: "100%",
+            background: "var(--panel-high)",
+            border: "1px solid var(--border)",
+            color: "var(--text)",
+            padding: "4px 0",
+            borderRadius: 4,
+            fontSize: 10,
+            cursor: isProcessing ? "not-allowed" : "pointer",
+          }}
+          title="Nâng cấp độ phân giải video lên 4K"
+        >
+          {isProcessing ? "Processing..." : "✨ Upscale 4K"}
+        </button>
+      )}
     </div>
   );
 }

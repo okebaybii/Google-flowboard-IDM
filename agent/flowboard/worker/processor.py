@@ -867,6 +867,153 @@ async def _handle_gen_video_omni(params: dict) -> tuple[dict, Optional[str]]:
     )
 
 
+async def _handle_upscale_video(params: dict) -> tuple[dict, Optional[str]]:
+    project_id = params.get("project_id")
+    media_id = params.get("media_id")
+    if not isinstance(project_id, str) or not project_id.strip():
+        return {}, "missing_project_id"
+    if not isinstance(media_id, str) or not media_id.strip():
+        return {}, "missing_media_id"
+
+    tier = params.get("paygate_tier") or flow_client.paygate_tier
+    if tier is None:
+        return {}, "paygate_tier_unknown"
+
+    aspect = params.get("aspect_ratio") or "VIDEO_ASPECT_RATIO_LANDSCAPE"
+    resolution = params.get("resolution") or "VIDEO_RESOLUTION_4K"
+
+    sdk = get_flow_sdk()
+    dispatch = await sdk.upscale_video(
+        media_id=media_id.strip(),
+        project_id=project_id.strip(),
+        paygate_tier=tier,
+        aspect_ratio=aspect,
+        resolution=resolution,
+    )
+    if dispatch.get("error"):
+        return dispatch, str(dispatch["error"])[:200]
+
+    op_names = dispatch.get("operation_names") or []
+    if not op_names:
+        return dispatch, "no_operations_returned"
+
+    workflows = dispatch.get("workflows") or None
+
+    poll_attempts = 0
+    last_poll: dict = {}
+    done_by_name: dict[str, bool] = {name: False for name in op_names}
+    entry_by_name: dict[str, dict] = {}
+    op_errors: dict[str, str] = {}
+    rid = params.get("__request_id")
+
+    while (
+        poll_attempts < VIDEO_POLL_MAX_CYCLES
+        and not all(done_by_name.values())
+    ):
+        await asyncio.sleep(VIDEO_POLL_INTERVAL_S)
+        poll_attempts += 1
+        if _is_request_canceled(rid):
+            return (
+                {
+                    "raw_dispatch": dispatch,
+                    "last_poll": last_poll,
+                    "operation_names": op_names,
+                    "done": done_by_name,
+                    "canceled": True,
+                },
+                "canceled",
+            )
+        last_poll = await sdk.check_async(op_names, workflows=workflows)
+        if last_poll.get("error"):
+            continue
+        for op in last_poll.get("operations") or []:
+            if not isinstance(op, dict):
+                continue
+            name = op.get("name")
+            if not isinstance(name, str) or done_by_name.get(name, False):
+                continue
+            err = op.get("error")
+            if isinstance(err, str) and err:
+                done_by_name[name] = True
+                op_errors[name] = err
+                continue
+            if op.get("done"):
+                done_by_name[name] = True
+                for e in op.get("media_entries") or []:
+                    if isinstance(e, dict) and e.get("media_id"):
+                        entry_by_name[name] = e
+                        break
+
+    for name in op_names:
+        if not done_by_name.get(name) and name not in op_errors:
+            op_errors[name] = "timeout_waiting_video"
+
+    positional_ids: list[Optional[str]] = []
+    slot_errors: list[Optional[str]] = []
+    succeeded_entries: list[dict] = []
+    for name in op_names:
+        e = entry_by_name.get(name)
+        if isinstance(e, dict) and isinstance(e.get("media_id"), str):
+            positional_ids.append(e["media_id"])
+            succeeded_entries.append(e)
+            slot_errors.append(None)
+        else:
+            positional_ids.append(None)
+            slot_errors.append(op_errors.get(name))
+
+    success_count = sum(1 for x in positional_ids if x)
+    if success_count == 0:
+        first_err = next(iter(op_errors.values()), "timeout_waiting_video")
+        return (
+            {
+                "raw_dispatch": dispatch,
+                "last_poll": last_poll,
+                "operation_names": op_names,
+                "done": done_by_name,
+                "op_errors": op_errors,
+            },
+            first_err,
+        )
+
+    entries_with_urls = [
+        e for e in succeeded_entries if isinstance(e, dict) and e.get("url")
+    ]
+    if entries_with_urls:
+        try:
+            media_service.ingest_urls(entries_with_urls)
+        except Exception:  # noqa: BLE001
+            logger.exception("auto-ingest from upscale_video response failed")
+
+    for entry in succeeded_entries:
+        if not isinstance(entry, dict):
+            continue
+        encoded = entry.get("encoded_video")
+        mid = entry.get("media_id")
+        if not isinstance(encoded, str) or not isinstance(mid, str):
+            continue
+        try:
+            import base64 as _b64
+            media_service.ingest_inline_bytes(
+                mid, _b64.b64decode(encoded, validate=False),
+                kind="video", mime="video/mp4",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("inline ingest from workflow-mode poll failed for %s", mid)
+
+    return (
+        {
+            "raw_dispatch": dispatch,
+            "last_poll": last_poll,
+            "operation_names": op_names,
+            "media_ids": positional_ids,
+            "media_entries": succeeded_entries,
+            "op_errors": op_errors,
+            "slot_errors": slot_errors,
+        },
+        None,
+    )
+
+
 _DEFAULT_HANDLERS: dict[str, Handler] = {
     "proxy": _handle_proxy,
     "create_project": _handle_create_project,
@@ -874,6 +1021,7 @@ _DEFAULT_HANDLERS: dict[str, Handler] = {
     "gen_video": _handle_gen_video,
     "gen_video_omni": _handle_gen_video_omni,
     "edit_image": _handle_edit_image,
+    "upscale_video": _handle_upscale_video,
 }
 
 
@@ -973,7 +1121,7 @@ class WorkerController:
             # Release the session during the possibly-long RPC.
             result, err = await handler(params)
 
-            if not err and node_id is not None and req_type in ("gen_image", "gen_video", "gen_video_omni", "edit_image"):
+            if not err and node_id is not None and req_type in ("gen_image", "gen_video", "gen_video_omni", "edit_image", "upscale_video"):
                 try:
                     apply_face_swap_to_node_media(node_id, req_type, result)
                 except Exception as fs_err:
@@ -1017,7 +1165,7 @@ class WorkerController:
                             node.data = node_data
                         else:
                             node.status = "done"
-                            if req_type in ("gen_image", "gen_video", "gen_video_omni", "edit_image"):
+                            if req_type in ("gen_image", "gen_video", "gen_video_omni", "edit_image", "upscale_video"):
                                 res = result if isinstance(result, dict) else {}
                                 media_ids = res.get("media_ids") or []
                                 media_id = next((m for m in media_ids if m), None)

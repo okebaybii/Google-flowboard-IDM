@@ -636,6 +636,71 @@ class FlowSDK:
             out["workflows"] = workflows
         return out
 
+    async def upscale_video(
+        self,
+        media_id: str,
+        project_id: str,
+        paygate_tier: str,
+        aspect_ratio: str = "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        resolution: str = "VIDEO_RESOLUTION_4K",
+    ) -> dict[str, Any]:
+        """Upscale a video.
+        
+        Returns ``{raw, operation_names}`` on success or ``{raw, error}``
+        on failure. Polls via the shared ``check_async`` path.
+        """
+        if paygate_tier is None:
+            raise ValueError("paygate_tier is required")
+        
+        # In Veo 3.1, upsampler key is usually static.
+        model_key = "veo_3_1_upsampler_4k"
+
+        ts = int(time.time() * 1000)
+        ctx = _client_context(project_id, paygate_tier)
+        request_item = {
+            "aspectRatio": aspect_ratio,
+            "resolution": resolution,
+            "seed": ts % 1000000,
+            "metadata": {"sceneId": str(uuid.uuid4())},
+            "videoInput": {"mediaId": media_id},
+            "videoModelKey": model_key,
+        }
+        
+        # 110: upscale endpoint in Google Flow
+        # Usually reusing VIDEO_I2V_URL or similar but with different payload
+        # For flowboard we'll assume VIDEO_UPSCALE_URL exists or we use VIDEO_I2V_URL
+        # Actually in FlowKit it uses `generate_video` endpoint `flowMedia:batchAsyncGenerateVideo`
+        # Let's use VIDEO_I2V_URL since it points to `batchAsyncGenerateVideo`
+        
+        body = {
+            "mediaGenerationContext": {"batchId": str(uuid.uuid4())},
+            "clientContext": {**ctx, "sessionId": f";{ts}"},
+            "requests": [request_item],
+            "useV2ModelConfig": True,
+        }
+
+        resp = await self._client.api_request(
+            url=VIDEO_I2V_URL,
+            method="POST",
+            headers=dict(_API_HEADERS),
+            body=body,
+            captcha_action=CAPTCHA_VIDEO,
+        )
+        if isinstance(resp, dict) and resp.get("error"):
+            return {"raw": resp, "error": resp["error"]}
+        inner_err = _extract_inner_api_error(resp)
+        if inner_err:
+            return {"raw": resp, "error": inner_err}
+
+        op_names = extract_operation_names(resp)
+        if not op_names:
+            return {"raw": resp, "error": "no_operations_in_response"}
+        out: dict[str, Any] = {"raw": resp, "operation_names": op_names}
+        workflows = extract_video_workflows(resp)
+        if workflows:
+            out["workflows"] = workflows
+        return out
+
     async def check_async(
         self,
         operation_names: list[str],
