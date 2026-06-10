@@ -67,6 +67,7 @@ class GeminiProvider:
 
         model = os.environ.get("FLOWBOARD_GEMINI_MODEL") or _DEFAULT_MODEL
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        headers = {}
 
         parts = []
         if attachments:
@@ -94,6 +95,12 @@ class GeminiProvider:
                 {
                     "parts": parts
                 }
+            ],
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
             ]
         }
         if system_prompt:
@@ -103,7 +110,7 @@ class GeminiProvider:
 
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.post(url, json=payload, timeout=timeout)
+                resp = await client.post(url, headers=headers, json=payload, timeout=timeout)
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPStatusError as exc:

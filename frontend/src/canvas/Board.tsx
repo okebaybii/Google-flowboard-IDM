@@ -241,7 +241,7 @@ export function Board() {
   const onConnect = useCallback(
     (connection: Connection) => {
       if (connection.source && connection.target) {
-        addEdgeFromConnection(connection.source, connection.target);
+        addEdgeFromConnection(connection);
         connectStateRef.current.didConnect = true;
       }
     },
@@ -286,7 +286,7 @@ export function Board() {
       if (!sourceId) return;
       const newId = await addNodeOfType(type, flowPos);
       if (newId) {
-        await addEdgeFromConnection(sourceId, newId);
+        await addEdgeFromConnection({ source: sourceId, target: newId });
       }
     },
     [dropPopover, addNodeOfType, addEdgeFromConnection],

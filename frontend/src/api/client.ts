@@ -29,7 +29,8 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!res.ok) {
-    throw new Error(`${res.status} ${res.statusText}`);
+    const errorMsg = await extractErrorMessage(res);
+    throw new Error(errorMsg);
   }
   return res.json() as Promise<T>;
 }
@@ -161,6 +162,8 @@ export interface EdgeDTO {
   source_id: number;
   target_id: number;
   kind: string;
+  source_handle: string | null;
+  target_handle: string | null;
   // null when the upstream is single-variant (or the edge hasn't been
   // pinned yet — natural fallback to source.mediaId at dispatch time).
   // 0-based index into the source node's `data.mediaIds[]` when the
@@ -264,6 +267,8 @@ export function createEdge(input: {
   source_id: number;
   target_id: number;
   kind?: string;
+  source_handle?: string | null;
+  target_handle?: string | null;
   source_variant_idx?: number | null;
 }): Promise<EdgeDTO> {
   return api<EdgeDTO>("/api/edges", {

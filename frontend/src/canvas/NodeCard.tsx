@@ -1027,11 +1027,48 @@ function VideoBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
   // i2v: variant i of the video came from variant i of the upstream
   // image; single-source: every tile shares the same poster.
   const { nodes, edges } = useBoardStore.getState();
-  const upstreamEdge = edges.find((e) => {
+  const upstreamCandidates = edges.filter((e) => {
     if (e.target !== rfId) return false;
     const src = nodes.find((n) => n.id === e.source);
-    return src && ["character", "image", "visual_asset", "Storyboard"].includes(src.data.type);
+    return src && ["character", "image", "visual_asset", "Storyboard", "video"].includes(src.data.type);
   });
+  const candidateHasMedia = (edge: (typeof upstreamCandidates)[number]) => {
+    const src = nodes.find((n) => n.id === edge.source);
+    if (!src) return false;
+    const mediaIds = Array.isArray(src.data.mediaIds) ? src.data.mediaIds : [];
+    return Boolean(
+      (typeof src.data.mediaId === "string" && src.data.mediaId)
+      || mediaIds.some((m) => typeof m === "string" && m.length > 0),
+    );
+  };
+  const candidateType = (edge: (typeof upstreamCandidates)[number]) =>
+    nodes.find((n) => n.id === edge.source)?.data.type;
+  const isContinuityChain =
+    data.continuityMode === "chain"
+    && typeof data.sequenceIndex === "number"
+    && data.sequenceIndex > 0;
+  const upstreamEdge =
+    isContinuityChain
+      ? (
+          upstreamCandidates.find(
+            (e) =>
+              e.targetHandle !== "fallback-start-image"
+              && candidateType(e) === "video"
+              && candidateHasMedia(e),
+          )
+          ?? upstreamCandidates.find((e) => e.targetHandle === "fallback-start-image" && candidateHasMedia(e))
+          ?? upstreamCandidates.find(
+            (e) => e.targetHandle !== "fallback-start-image" && candidateType(e) === "video",
+          )
+          ?? upstreamCandidates.find((e) => e.targetHandle === "fallback-start-image")
+          ?? upstreamCandidates[0]
+        )
+      : (
+          upstreamCandidates.find((e) => e.targetHandle !== "fallback-start-image" && candidateHasMedia(e))
+          ?? upstreamCandidates.find((e) => e.targetHandle === "fallback-start-image" && candidateHasMedia(e))
+          ?? upstreamCandidates.find((e) => e.targetHandle !== "fallback-start-image")
+          ?? upstreamCandidates[0]
+        );
   const upstreamNode = upstreamEdge
     ? nodes.find((n) => n.id === upstreamEdge.source)
     : undefined;
@@ -1133,7 +1170,7 @@ function VideoBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
             const newId = await store.addNodeOfType("video", newPos);
             
             if (newId) {
-              await store.addEdgeFromConnection(rfId, newId);
+              await store.addEdgeFromConnection({ source: rfId, target: newId });
               
               const inheritedData = {
                 prompt: data.prompt || "",
@@ -1900,9 +1937,20 @@ function StoryScriptBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
 
     try {
       const dbId = parseInt(rfId, 10);
+      let projectId: string | null = null;
+      if (localSampleVideoUrl.trim()) {
+        projectId = await useGenerationStore.getState().ensureProjectId();
+        if (!projectId) {
+          throw new Error("Không lấy được Flow project để upload frame tham chiếu từ video mẫu.");
+        }
+      }
       await api(`/api/nodes/story-script/${dbId}/generate`, {
         method: "POST",
-        body: JSON.stringify({ prompt: localPrompt, sampleVideoUrl: localSampleVideoUrl }),
+        body: JSON.stringify({
+          prompt: localPrompt,
+          sampleVideoUrl: localSampleVideoUrl,
+          projectId,
+        }),
       });
       
       // Update state to done

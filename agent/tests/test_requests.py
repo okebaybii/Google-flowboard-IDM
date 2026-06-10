@@ -267,6 +267,142 @@ async def test_worker_gen_image_stores_media_ids(client):
 # ── gen_video worker tests ─────────────────────────────────────────────────
 
 
+def test_trigger_downstream_video_after_video_completion_queues_next_clip(client, monkeypatch):
+    from flowboard.db import get_session
+    from flowboard.db.models import BoardFlowProject, Request
+    from flowboard.worker import processor as proc
+    from sqlmodel import select
+
+    b = _board(client)
+    source = client.post(
+        "/api/nodes",
+        json={
+            "board_id": b["id"],
+            "type": "video",
+            "data": {"title": "Clip 1", "mediaId": "vid-aaa"},
+            "status": "done",
+        },
+    ).json()
+    target = client.post(
+        "/api/nodes",
+        json={
+            "board_id": b["id"],
+            "type": "video",
+            "data": {
+                "title": "Clip 2",
+                "prompt": "continue from the final pose",
+                "aspectRatio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+            },
+        },
+    ).json()
+    skipped = client.post(
+        "/api/nodes",
+        json={
+            "board_id": b["id"],
+            "type": "video",
+            "data": {"title": "Fallback only", "prompt": "should not run"},
+        },
+    ).json()
+    client.post(
+        "/api/edges",
+        json={"board_id": b["id"], "source_id": source["id"], "target_id": target["id"]},
+    )
+    client.post(
+        "/api/edges",
+        json={
+            "board_id": b["id"],
+            "source_id": source["id"],
+            "target_id": skipped["id"],
+            "target_handle": "fallback-start-image",
+        },
+    )
+
+    with get_session() as s:
+        s.add(BoardFlowProject(board_id=b["id"], flow_project_id="abcd1234"))
+        s.commit()
+
+    enqueued: list[int] = []
+
+    class _Worker:
+        def enqueue(self, rid: int) -> None:
+            enqueued.append(rid)
+
+    monkeypatch.setattr(proc, "get_worker", lambda: _Worker())
+
+    proc._trigger_downstream_videos(source["id"], "vid-aaa")
+
+    with get_session() as s:
+        requests = s.exec(select(Request)).all()
+        assert len(requests) == 1
+        req = requests[0]
+        assert req.node_id == target["id"]
+        assert req.type == "gen_video"
+        assert req.params["start_media_id"] == "vid-aaa"
+        assert req.params["prompt"] == "continue from the final pose"
+        assert enqueued == [req.id]
+
+    detail = client.get(f"/api/boards/{b['id']}").json()
+    nodes = {n["id"]: n for n in detail["nodes"]}
+    assert nodes[target["id"]]["status"] == "queued"
+    assert nodes[skipped["id"]]["status"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_extract_last_frame_uploads_image_and_returns_new_media_id(
+    client,
+    monkeypatch,
+    tmp_path,
+):
+    import subprocess
+
+    from flowboard.db import get_session
+    from flowboard.db.models import Asset
+    from flowboard.services import flow_sdk
+    from flowboard.worker import processor as proc
+
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"fake-video")
+
+    with get_session() as s:
+        s.add(
+            Asset(
+                uuid_media_id="vid-aaa",
+                kind="video",
+                local_path=str(video_path),
+                mime="video/mp4",
+            )
+        )
+        s.commit()
+
+    def fake_run(cmd, stdout=None, stderr=None, check=False):
+        assert cmd[0] == "ffmpeg"
+        out_path = cmd[-1]
+        tmp_path.joinpath("seen-cmd.txt").write_text(" ".join(cmd), encoding="utf-8")
+        with open(out_path, "wb") as f:
+            f.write(b"fake-jpeg")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    captured: dict[str, str] = {}
+
+    class _Sdk:
+        async def upload_image(self, **kwargs):
+            captured.update(kwargs)
+            return {"raw": {}, "media_id": "img-last-frame"}
+
+    monkeypatch.setattr(flow_sdk, "get_flow_sdk", lambda: _Sdk())
+
+    out = await proc._extract_last_frame_and_upload("vid-aaa", "abcd1234")
+
+    assert out == "img-last-frame"
+    assert captured["project_id"] == "abcd1234"
+    assert captured["mime_type"] == "image/jpeg"
+    assert captured["file_name"] == "extend_vid-aaa.jpg"
+    assert "image_base64" in captured
+    assert "b64_data" not in captured
+
+
 @pytest.mark.asyncio
 async def test_worker_gen_video_happy_path(client, monkeypatch):
     """SDK returns op names then reports done on second poll; worker ingests."""

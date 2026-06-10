@@ -35,6 +35,8 @@ class Edge(SQLModel, table=True):
     source_id: int = Field(foreign_key="node.id")
     target_id: int = Field(foreign_key="node.id")
     kind: str = "ref"
+    source_handle: Optional[str] = None
+    target_handle: Optional[str] = None
     # Per-edge variant pin: when the source node holds multiple variants
     # (`data.mediaIds`), this index selects WHICH variant feeds the
     # downstream as a reference. None = "fall back to the source's

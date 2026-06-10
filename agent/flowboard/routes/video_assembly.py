@@ -961,10 +961,10 @@ async def run_batch_generation(
                                 aspect_mismatch = True
 
                     media_id = node.data.get("mediaId")
-                    if node.status == "done" and media_id and not aspect_mismatch:
+                    if node.status == "done" and media_id:
                         logger.info(f"Node {nid} is already done. Skipping.")
                         continue
-                    if node.status == "error" and media_id and not retry_failed and not aspect_mismatch:
+                    if node.status == "error" and media_id and not retry_failed:
                         logger.info(f"Node {nid} is error but already has media. Skipping.")
                         failed_nodes.add(nid)
                         continue
@@ -976,7 +976,11 @@ async def run_batch_generation(
                     if upstream_failed:
                         failed_nodes.add(nid)
                         node.status = "error"
-                        node.data = {**dict(node.data), "error": "upstream_failed"}
+                        node.data = {
+                            **dict(node.data), 
+                            "error": "upstream_failed",
+                            "errorHint": "Clip trước đó bị lỗi, không thể tiếp tục tạo clip này."
+                        }
                         session.add(node)
                         session.commit()
                         continue
@@ -1148,8 +1152,8 @@ async def run_batch_generation(
                                 params["start_media_id"] = start_media_ids[0]
                             req_type = "gen_video"
 
-                # We try generating the node with auto-retry up to 2 attempts
-                max_attempts = 2
+                # We try generating the node with auto-retry up to 2 attempts, or indefinitely if retry_failed is True
+                max_attempts = 9999 if retry_failed else 2
                 settled = None
                 error_message = "generation failed"
                 success = False
@@ -1162,6 +1166,8 @@ async def run_batch_generation(
                             break
                         node.status = "queued"
                         node_data = dict(node.data)
+                        node_data["error"] = ""
+                        node_data["errorHint"] = ""
                         if node.type in ("image", "Storyboard"):
                             node_data["aspectRatio"] = img_aspect
                         else:
@@ -1191,8 +1197,11 @@ async def run_batch_generation(
                         else:
                             error_message = settled.error or "generation failed"
                             logger.warning(f"Node {nid} attempt {attempt_idx + 1} failed: {error_message}")
+                    except asyncio.TimeoutError:
+                        error_message = "timeout_waiting_video"
+                        logger.warning(f"Node {nid} attempt {attempt_idx + 1} timed out")
                     except Exception as ex:
-                        error_message = str(ex)
+                        error_message = str(ex) or repr(ex)
                         logger.warning(f"Node {nid} attempt {attempt_idx + 1} raised error: {ex}")
                     
                     if attempt_idx < max_attempts - 1:

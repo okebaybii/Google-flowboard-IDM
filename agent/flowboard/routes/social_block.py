@@ -113,6 +113,11 @@ def get_connected_asset_paths(node_id: int, session: Session) -> List[Dict[str, 
 router = APIRouter(prefix="/api/social-blocks", tags=["social-blocks"])
 
 
+def _session_dependency():
+    with get_session() as session:
+        yield session
+
+
 # ============================================================================
 # CREATE
 # ============================================================================
@@ -124,12 +129,9 @@ def create_social_block(
     platforms: List[str] = None,
     content: str = "",
     content_type: str = "manual",
-    session: Session = Depends(get_session),
+    session: Session = Depends(_session_dependency),
 ):
     """Create a new Social Block."""
-    if session is None:
-        session = next(get_session())
-    
     try:
         # Verify node exists
         node = session.exec(select(Node).where(Node.id == node_id)).first()
@@ -166,7 +168,7 @@ def create_social_block(
 # ============================================================================
 
 @router.get("/{block_id}")
-def get_social_block(block_id: int, session: Session = Depends(get_session)):
+def get_social_block(block_id: int, session: Session = Depends(_session_dependency)):
     """Get a Social Block by ID."""
     
     try:
@@ -196,7 +198,7 @@ def get_social_block(block_id: int, session: Session = Depends(get_session)):
 def list_social_blocks(
     board_id: int = Query(None),
     status: str = Query(None),
-    session: Session = Depends(get_session),
+    session: Session = Depends(_session_dependency),
 ):
     """List Social Blocks with optional filtering."""
     
@@ -237,7 +239,7 @@ def update_social_block(
     content: str = None,
     content_type: str = None,
     ai_prompt: str = None,
-    session: Session = Depends(get_session),
+    session: Session = Depends(_session_dependency),
 ):
     """Update a Social Block."""
     
@@ -369,7 +371,7 @@ def schedule_social_block(
 # ============================================================================
 
 @router.post("/{block_id}/post")
-async def post_social_block(block_id: int, session: Session = Depends(get_session)):
+async def post_social_block(block_id: int, session: Session = Depends(_session_dependency)):
     """Post a Social Block to all scheduled platforms."""
     import os
     
@@ -635,7 +637,7 @@ async def post_social_block_now(
 
 
 @router.get("/{block_id}/status")
-def get_social_block_status(block_id: int, session: Session = Depends(get_session)):
+def get_social_block_status(block_id: int, session: Session = Depends(_session_dependency)):
     """Get status of a Social Block and its posts."""
     
     try:
@@ -677,7 +679,7 @@ def get_social_block_status(block_id: int, session: Session = Depends(get_sessio
 # ============================================================================
 
 @router.delete("/{block_id}")
-def delete_social_block(block_id: int, session: Session = Depends(get_session)):
+def delete_social_block(block_id: int, session: Session = Depends(_session_dependency)):
     """Delete a Social Block."""
     
     try:

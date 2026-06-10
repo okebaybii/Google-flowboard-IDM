@@ -49,6 +49,16 @@ def init_db() -> None:
                     "ALTER TABLE edge ADD COLUMN source_variant_idx INTEGER"
                 )
                 conn.commit()
+            if "source_handle" not in edge_cols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE edge ADD COLUMN source_handle TEXT"
+                )
+                conn.commit()
+            if "target_handle" not in edge_cols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE edge ADD COLUMN target_handle TEXT"
+                )
+                conn.commit()
 
         if insp.has_table("socialblock"):
             social_cols = {c["name"] for c in insp.get_columns("socialblock")}

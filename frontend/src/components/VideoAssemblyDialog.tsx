@@ -138,7 +138,10 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
         pollIntervalRef.current = null;
       }
       const firstErrored = connectedVideos.find((n) => n.data.status === "error");
-      const firstError = firstErrored?.data.error || "Một số clip tạo thất bại.";
+      const firstError =
+        firstErrored?.data.errorHint
+        || firstErrored?.data.error
+        || "Một số clip tạo thất bại.";
       setError(`Batch dừng: ${firstError}`);
     }
   }, [batchGenerating, unrenderedCount, totalConnected, autoAssembleAfterBatch, assembling, runningCount, errorCount, connectedMediaIdsKey]);

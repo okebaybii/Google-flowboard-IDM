@@ -40,6 +40,13 @@ const REF_SOURCE_TYPES = new Set([
   // Storyboard outputs are first-class refs — they're composite images
   // that can feed downstream image / Omni-video / character nodes.
   "Storyboard",
+  "video"
+]);
+const IMAGE_REF_SOURCE_TYPES = new Set([
+  "character",
+  "image",
+  "visual_asset",
+  "Storyboard",
 ]);
 
 function buildCharacterPrompt(
@@ -321,22 +328,67 @@ export function GenerationDialog() {
   // multiple variants, we batch-i2v one video per variant — `sourceMediaIds`
   // captures the full set; `sourceMediaId` is the active variant for the
   // legacy single-source path.
-  const sourceEdge = isVideo
-    ? edges.find((e) => {
+  const sourceCandidates = isVideo
+    ? edges.filter((e) => {
         if (e.target !== rfId) return false;
         if (e.targetHandle === "end-image") return false;
         const src = nodes.find((n) => n.id === e.source);
         return src && REF_SOURCE_TYPES.has(src.data.type);
       })
+    : [];
+  const hasUsableSourceMedia = (edge: (typeof sourceCandidates)[number]) => {
+    const src = nodes.find((n) => n.id === edge.source);
+    if (!src) return false;
+    const variants = Array.isArray(src.data.mediaIds) ? src.data.mediaIds : [];
+    return Boolean(
+      (typeof src.data.mediaId === "string" && src.data.mediaId)
+      || variants.some((m) => typeof m === "string" && m.length > 0),
+    );
+  };
+  const sourceTypeForEdge = (edge: (typeof sourceCandidates)[number]) =>
+    nodes.find((n) => n.id === edge.source)?.data.type;
+  const isContinuityChainVideo =
+    isVideo
+    && node?.data.continuityMode === "chain"
+    && typeof node.data.sequenceIndex === "number"
+    && node.data.sequenceIndex > 0;
+  const sourceEdge = isVideo
+    ? isContinuityChainVideo
+      ? (
+          sourceCandidates.find(
+            (e) =>
+              e.targetHandle !== "fallback-start-image"
+              && sourceTypeForEdge(e) === "video"
+              && hasUsableSourceMedia(e),
+          )
+          ?? sourceCandidates.find(
+            (e) => e.targetHandle === "fallback-start-image" && hasUsableSourceMedia(e),
+          )
+          ?? sourceCandidates.find(
+            (e) => e.targetHandle !== "fallback-start-image" && sourceTypeForEdge(e) === "video",
+          )
+          ?? sourceCandidates.find((e) => e.targetHandle === "fallback-start-image")
+          ?? sourceCandidates[0]
+        )
+      : (
+          sourceCandidates.find(
+            (e) => e.targetHandle !== "fallback-start-image" && hasUsableSourceMedia(e),
+          )
+          ?? sourceCandidates.find(
+            (e) => e.targetHandle === "fallback-start-image" && hasUsableSourceMedia(e),
+          )
+          ?? sourceCandidates.find((e) => e.targetHandle !== "fallback-start-image")
+          ?? sourceCandidates[0]
+        )
     : undefined;
   const sourceNode = sourceEdge ? nodes.find((n) => n.id === sourceEdge.source) : undefined;
 
   const endEdge = isVideo
     ? edges.find((e) => {
         if (e.target !== rfId) return false;
-        if (e.targetHandle === "end-image") return false;
+        if (e.targetHandle !== "end-image") return false;
         const src = nodes.find((n) => n.id === e.source);
-        return src && REF_SOURCE_TYPES.has(src.data.type);
+        return src && IMAGE_REF_SOURCE_TYPES.has(src.data.type);
       })
     : undefined;
   const endNode = endEdge ? nodes.find((n) => n.id === endEdge.source) : undefined;
@@ -409,7 +461,7 @@ export function GenerationDialog() {
         .filter((e) => e.target === rfId)
         .map((e) => {
           const n = nodes.find((node) => node.id === e.source);
-          if (!n || !REF_SOURCE_TYPES.has(n.data.type)) return null;
+          if (!n || !IMAGE_REF_SOURCE_TYPES.has(n.data.type)) return null;
           const variants = (Array.isArray(n.data.mediaIds) ? n.data.mediaIds : [])
             .filter((m): m is string => typeof m === "string" && m.length > 0);
           const pin = (e.data?.sourceVariantIdx ?? null) as number | null;
@@ -511,6 +563,7 @@ export function GenerationDialog() {
       const { nodes: boardNodes, edges: boardEdges } = useBoardStore.getState();
       const upstreamEdge = boardEdges.find((e) => {
         if (e.target !== rfId) return false;
+        if (e.targetHandle === "end-image") return false;
         const src = boardNodes.find((n) => n.id === e.source);
         return src && REF_SOURCE_TYPES.has(src.data.type);
       });
@@ -526,7 +579,7 @@ export function GenerationDialog() {
         if (e.target !== rfId) return false;
         if (e.targetHandle !== "end-image") return false;
         const src = boardNodes.find((n) => n.id === e.source);
-        return src && REF_SOURCE_TYPES.has(src.data.type);
+        return src && IMAGE_REF_SOURCE_TYPES.has(src.data.type);
       });
       const endUpstreamNode = endUpstreamEdge
         ? boardNodes.find((n) => n.id === endUpstreamEdge.source)

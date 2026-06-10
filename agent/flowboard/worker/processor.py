@@ -1046,7 +1046,8 @@ class WorkerController:
                     req = s.get(Request, rid)
                     if req is not None and req.status != "canceled":
                         req.status = "failed"
-                        req.error = str(exc)[:500]
+                        err_str = str(exc).strip() or repr(exc)
+                        req.error = err_str[:500]
                         req.finished_at = datetime.now(timezone.utc)
                         s.add(req)
                         
@@ -1057,7 +1058,7 @@ class WorkerController:
                             if node:
                                 node.status = "error"
                                 node_data = dict(node.data or {})
-                                node_data["error"] = str(exc)[:500]
+                                node_data["error"] = err_str[:500]
                                 node.data = node_data
                                 s.add(node)
                         s.commit()

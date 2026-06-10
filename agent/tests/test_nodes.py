@@ -1,3 +1,9 @@
+import json
+import sys
+import types
+from pathlib import Path
+
+
 def _make_board(client, name="Test"):
     return client.post("/api/boards", json={"name": name}).json()
 
@@ -252,3 +258,254 @@ def test_delete_node_cascades_edges(client):
     # edge is gone server-side
     detail = client.get(f"/api/boards/{b['id']}").json()
     assert detail["edges"] == []
+
+
+def test_story_script_sample_video_creates_reference_asset(client, monkeypatch):
+    """Sample-video frames must become real media refs, not just LLM context."""
+    from flowboard.routes import nodes as nodes_route
+
+    b = _make_board(client)
+    story = client.post(
+        "/api/nodes",
+        json={
+            "board_id": b["id"],
+            "type": "story_script",
+            "data": {"title": "Story", "prompt": "copy this dance"},
+        },
+    ).json()
+
+    class _Provider:
+        async def is_available(self):
+            return True
+
+        async def run(self, *_args, **_kwargs):
+            return json.dumps(
+                [
+                    {
+                        "title": "Cảnh 1",
+                        "image_prompt": "same dancer in the room",
+                        "video_prompt": "performing the same dance move",
+                        "narration": "Nhảy theo mẫu.",
+                    },
+                    {
+                        "title": "Cảnh 2",
+                        "image_prompt": "same dancer continues",
+                        "video_prompt": "continues the choreography",
+                        "narration": "Tiếp tục động tác.",
+                    },
+                ]
+            )
+
+    monkeypatch.setattr(
+        nodes_route.secrets,
+        "read_active_providers",
+        lambda: {"planner": "fake"},
+    )
+    monkeypatch.setattr(nodes_route.registry, "get_provider", lambda _name: _Provider())
+
+    media_id = "11111111-1111-1111-1111-111111111111"
+
+    class _Sdk:
+        async def upload_image(self, **kwargs):
+            assert kwargs["project_id"] == "abcd1234"
+            assert kwargs["mime_type"] == "image/jpeg"
+            return {"raw": {}, "media_id": media_id}
+
+    monkeypatch.setattr(nodes_route, "get_flow_sdk", lambda: _Sdk())
+
+    class _Frame:
+        shape = (720, 1280, 3)
+
+    class _Cap:
+        def __init__(self, _path):
+            self.idx = 0
+
+        def get(self, prop):
+            if prop == fake_cv2.CAP_PROP_FPS:
+                return 8
+            if prop == fake_cv2.CAP_PROP_FRAME_COUNT:
+                return 8
+            return 0
+
+        def isOpened(self):
+            return self.idx < 8
+
+        def read(self):
+            if self.idx >= 8:
+                return False, None
+            self.idx += 1
+            return True, _Frame()
+
+        def release(self):
+            pass
+
+    def _imwrite(path, _frame):
+        Path(path).write_bytes(b"\xff\xd8\xff\xe0flowboard-test-frame")
+        return True
+
+    fake_cv2 = types.SimpleNamespace(
+        CAP_PROP_FPS=1,
+        CAP_PROP_FRAME_COUNT=2,
+        COLOR_BGR2GRAY=3,
+        VideoCapture=_Cap,
+        imwrite=_imwrite,
+    )
+
+    class _YDL:
+        def __init__(self, _opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def extract_info(self, _url, download=True):
+            return {"ext": "mp4"}
+
+    fake_ytdlp = types.SimpleNamespace(YoutubeDL=_YDL)
+    monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+    monkeypatch.setitem(sys.modules, "yt_dlp", fake_ytdlp)
+
+    res = client.post(
+        f"/api/nodes/story-script/{story['id']}/generate",
+        json={
+            "prompt": "copy this dance",
+            "sampleVideoUrl": "https://example.com/dance.mp4",
+            "projectId": "abcd1234",
+        },
+    )
+    assert res.status_code == 200, res.text
+
+    detail = client.get(f"/api/boards/{b['id']}").json()
+    sample_refs = [
+        n
+        for n in detail["nodes"]
+        if n["type"] == "visual_asset"
+        and n["data"].get("sourceStoryScriptId") == story["id"]
+    ]
+    assert len(sample_refs) == 1
+    sample_ref = sample_refs[0]
+    assert sample_ref["data"]["mediaId"] == media_id
+    assert sample_ref["data"]["aspectRatio"] == "IMAGE_ASPECT_RATIO_LANDSCAPE"
+
+    image_nodes = [n for n in detail["nodes"] if n["type"] == "image"]
+    video_nodes = sorted(
+        [n for n in detail["nodes"] if n["type"] == "video"],
+        key=lambda n: n["x"],
+    )
+    assert len(image_nodes) == 1
+    assert len(video_nodes) == 2
+
+    first_video_data = video_nodes[0]["data"]
+    second_video_data = video_nodes[1]["data"]
+    assert first_video_data["sequenceIndex"] == 0
+    assert first_video_data["sequenceTotal"] == 2
+    assert first_video_data["continuityMode"] == "chain"
+    assert "Continuous video sequence clip 1 of 2" in first_video_data["prompt"]
+    assert "Action beat for this clip: performing the same dance move" in first_video_data["prompt"]
+    assert second_video_data["sequenceIndex"] == 1
+    assert second_video_data["sequenceTotal"] == 2
+    assert second_video_data["requiresPreviousClip"] is True
+    assert second_video_data["fallbackStartImage"] is True
+    assert "Continuous video sequence clip 2 of 2" in second_video_data["prompt"]
+    assert "final frame of clip 1" in second_video_data["prompt"]
+    assert "continues the choreography" in second_video_data["prompt"]
+
+    edges = detail["edges"]
+    assert any(
+        e["source_id"] == sample_ref["id"] and e["target_id"] == image_nodes[0]["id"]
+        for e in edges
+    )
+    assert all(
+        any(e["source_id"] == sample_ref["id"] and e["target_id"] == v["id"] for e in edges)
+        for v in video_nodes
+    )
+    assert any(
+        e["source_id"] == image_nodes[0]["id"]
+        and e["target_id"] == video_nodes[1]["id"]
+        and e["target_handle"] == "fallback-start-image"
+        for e in edges
+    )
+    assert "Do not invent a different character" in image_nodes[0]["data"]["prompt"]
+
+
+def test_story_script_character_reference_locks_identity_without_sample_video(client, monkeypatch):
+    from flowboard.routes import nodes as nodes_route
+
+    b = _make_board(client)
+    character = client.post(
+        "/api/nodes",
+        json={
+            "board_id": b["id"],
+            "type": "character",
+            "data": {
+                "title": "Main character",
+                "mediaId": "22222222-2222-2222-2222-222222222222",
+                "mediaIds": ["22222222-2222-2222-2222-222222222222"],
+            },
+            "status": "done",
+        },
+    ).json()
+    story = client.post(
+        "/api/nodes",
+        json={
+            "board_id": b["id"],
+            "type": "story_script",
+            "data": {"title": "Story", "prompt": "make her dance"},
+        },
+    ).json()
+    client.post(
+        "/api/edges",
+        json={
+            "board_id": b["id"],
+            "source_id": character["id"],
+            "target_id": story["id"],
+        },
+    )
+
+    class _Provider:
+        async def is_available(self):
+            return True
+
+        async def run(self, *_args, **_kwargs):
+            return json.dumps(
+                [
+                    {
+                        "title": "Cảnh 1",
+                        "image_prompt": "a neon stage dancer",
+                        "video_prompt": "dancing with fast arm movement",
+                        "narration": "Nhân vật bắt đầu nhảy.",
+                    }
+                ]
+            )
+
+    monkeypatch.setattr(
+        nodes_route.secrets,
+        "read_active_providers",
+        lambda: {"planner": "fake"},
+    )
+    monkeypatch.setattr(nodes_route.registry, "get_provider", lambda _name: _Provider())
+
+    res = client.post(
+        f"/api/nodes/story-script/{story['id']}/generate",
+        json={"prompt": "make her dance"},
+    )
+    assert res.status_code == 200, res.text
+
+    detail = client.get(f"/api/boards/{b['id']}").json()
+    image_node = next(n for n in detail["nodes"] if n["type"] == "image")
+    video_node = next(n for n in detail["nodes"] if n["type"] == "video")
+
+    assert "connected Character reference as the authoritative identity source" in image_node["data"]["prompt"]
+    assert "not hidden by silhouette" in image_node["data"]["prompt"]
+    assert "connected Character reference as the authoritative identity source" in video_node["data"]["prompt"]
+    assert any(
+        e["source_id"] == character["id"] and e["target_id"] == image_node["id"]
+        for e in detail["edges"]
+    )
+    assert any(
+        e["source_id"] == character["id"] and e["target_id"] == video_node["id"]
+        for e in detail["edges"]
+    )

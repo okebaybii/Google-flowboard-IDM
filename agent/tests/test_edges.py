@@ -45,6 +45,29 @@ def test_create_edge_with_variant_pin(client):
     assert r.json()["source_variant_idx"] == 2
 
 
+def test_create_edge_preserves_handles(client):
+    """React Flow handle ids must round-trip so video end-image edges survive reload."""
+    b, a, c = _scaffold(client)
+    r = client.post(
+        "/api/edges",
+        json={
+            "board_id": b["id"],
+            "source_id": a["id"],
+            "target_id": c["id"],
+            "source_handle": "main-output",
+            "target_handle": "end-image",
+        },
+    )
+    assert r.status_code == 200
+    edge = r.json()
+    assert edge["source_handle"] == "main-output"
+    assert edge["target_handle"] == "end-image"
+
+    detail = client.get(f"/api/boards/{b['id']}").json()
+    assert detail["edges"][0]["source_handle"] == "main-output"
+    assert detail["edges"][0]["target_handle"] == "end-image"
+
+
 def test_patch_edge_variant_pin(client):
     """PATCH updates the variant pin in place. Setting an int pins;
     explicit null clears the pin (revert to source.mediaId)."""

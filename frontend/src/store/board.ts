@@ -119,12 +119,16 @@ function edgeFromDto(dto: {
   id: number;
   source_id: number;
   target_id: number;
+  source_handle?: string | null;
+  target_handle?: string | null;
   source_variant_idx?: number | null;
 }): Edge<FlowboardEdgeData> {
   return {
     id: String(dto.id),
     source: String(dto.source_id),
     target: String(dto.target_id),
+    sourceHandle: dto.source_handle ?? null,
+    targetHandle: dto.target_handle ?? null,
     data: { sourceVariantIdx: dto.source_variant_idx ?? null },
   };
 }
@@ -227,7 +231,12 @@ interface BoardState {
   ): Promise<string | null>;
   persistNodePosition(rfId: string, position: { x: number; y: number }): Promise<void>;
   deleteNodeByRfId(rfId: string): Promise<void>;
-  addEdgeFromConnection(source: string, target: string): Promise<void>;
+  addEdgeFromConnection(connection: {
+    source: string | null;
+    target: string | null;
+    sourceHandle?: string | null;
+    targetHandle?: string | null;
+  }): Promise<void>;
   deleteEdgeByRfId(rfId: string): Promise<void>;
   // Spawn an empty sibling node next to `rfId` with the same type and the
   // same upstream edges. Returns the new node's rfId so callers can focus
@@ -592,14 +601,21 @@ export const useBoardStore = create<BoardState>((set, get) => ({
     }
   },
 
-  async addEdgeFromConnection(source, target) {
+  async addEdgeFromConnection(connection) {
     const { boardId } = get();
     if (boardId === null) return;
-    const sourceId = parseInt(source, 10);
-    const targetId = parseInt(target, 10);
+    if (!connection.source || !connection.target) return;
+    const sourceId = parseInt(connection.source, 10);
+    const targetId = parseInt(connection.target, 10);
     if (isNaN(sourceId) || isNaN(targetId)) return;
     try {
-      const dto = await createEdge({ board_id: boardId, source_id: sourceId, target_id: targetId });
+      const dto = await createEdge({
+        board_id: boardId,
+        source_id: sourceId,
+        target_id: targetId,
+        source_handle: connection.sourceHandle ?? null,
+        target_handle: connection.targetHandle ?? null,
+      });
       set((s) => ({ edges: [...s.edges, edgeFromDto(dto)] }));
     } catch {
       // ignore
@@ -652,24 +668,19 @@ export const useBoardStore = create<BoardState>((set, get) => ({
     set((s) => ({ nodes: [...s.nodes, newNode] }));
 
     // Replicate upstream edges: every (upstream → src) becomes (upstream → clone).
-    const upstreamSourceRfIds = edges
-      .filter((e) => e.target === rfId)
-      .map((e) => e.source);
-    for (const usrc of upstreamSourceRfIds) {
-      const sourceId = parseInt(usrc, 10);
+    const upstreamEdges = edges.filter((e) => e.target === rfId);
+    for (const edge of upstreamEdges) {
+      const sourceId = parseInt(edge.source, 10);
       if (isNaN(sourceId)) continue;
       try {
         const eDto = await createEdge({
           board_id: boardId,
           source_id: sourceId,
           target_id: nodeDto.id,
+          source_handle: edge.sourceHandle ?? null,
+          target_handle: edge.targetHandle ?? null,
         });
-        const newEdge: Edge = {
-          id: String(eDto.id),
-          source: String(eDto.source_id),
-          target: String(eDto.target_id),
-        };
-        set((s) => ({ edges: [...s.edges, newEdge] }));
+        set((s) => ({ edges: [...s.edges, edgeFromDto(eDto)] }));
       } catch {
         // best-effort — partial edge replication still useful
       }
