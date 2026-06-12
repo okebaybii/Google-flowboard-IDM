@@ -419,7 +419,7 @@ async def run_pipeline(
         else:  # video
             images_found = []
             for u in upstream_nodes:
-                if u.type in ("image", "Storyboard"):
+                if u.type in ("image", "Storyboard", "video"):
                     mid = (u.data or {}).get("mediaId")
                     if isinstance(mid, str) and mid:
                         images_found.append(mid)

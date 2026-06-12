@@ -55,6 +55,17 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
   const [retryFailedClips, setRetryFailedClips] = useState(
     Boolean(data.retryFailedClips) || false
   );
+  const [aiTransition, setAiTransition] = useState(
+    Boolean(data.aiTransition) || false
+  );
+  const handleAiTransitionChange = (checked: boolean) => {
+    setAiTransition(checked);
+    useBoardStore.getState().updateNodeData(rfId, { aiTransition: checked });
+    const dbId = parseInt(rfId, 10);
+    if (!isNaN(dbId)) {
+      void patchNode(dbId, { data: { aiTransition: checked } });
+    }
+  };
   const autoAssembleTriggeredRef = useRef(false);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -929,6 +940,23 @@ export function VideoAssemblyDialog({ rfId, data, onClose }: VideoAssemblyDialog
               </button>
             )}
           </div>
+        </div>
+
+        {/* AI Transition Toggle */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", background: "rgba(124, 92, 255, 0.05)", border: "1px solid rgba(124, 92, 255, 0.15)", borderRadius: 6, marginBottom: 12 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer", color: "var(--text)", fontWeight: 500 }}>
+            <input
+              type="checkbox"
+              checked={aiTransition}
+              onChange={(e) => handleAiTransitionChange(e.target.checked)}
+              disabled={assembling}
+              style={{ width: 15, height: 15, cursor: "pointer" }}
+            />
+            🤖 Bật chuyển cảnh AI (Morphing giữa các phân cảnh)
+          </label>
+          <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: "auto" }}>
+            (Yêu cầu thêm quota Flow)
+          </span>
         </div>
 
         {/* Error message */}

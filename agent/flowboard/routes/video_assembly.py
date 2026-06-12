@@ -603,20 +603,29 @@ async def _assemble_videos_impl(
             video_nodes.sort(key=sort_key)
             
             # 4. Resolve cached media file paths and narrations
-            video_paths = []
-            narrations = []
+            video_info = []
             for vn in video_nodes:
                 media_id = vn.data.get("mediaId")
                 if not media_id:
                     continue
                 path = media_service.cached_path(media_id)
                 if path and path.exists():
-                    video_paths.append(str(path))
-                    narrations.append(vn.data.get("narration", ""))
+                    video_info.append({
+                        "media_id": media_id,
+                        "path": str(path),
+                        "narration": vn.data.get("narration", "")
+                    })
                     
-            if not video_paths:
+            if not video_info:
                 raise HTTPException(status_code=400, detail="Connected videos have not been generated yet. Please generate them first.")
                 
+            ai_transition = bool(node.data.get("aiTransition"))
+            from flowboard.db.models import BoardFlowProject
+            project_mapping = session.get(BoardFlowProject, node.board_id)
+            project_id = project_mapping.flow_project_id if project_mapping else "default_project"
+            from flowboard.services.flow_client import flow_client
+            paygate_tier = flow_client.paygate_tier or "PAYGATE_TIER_TWO"
+
             # 5. Check background audio
             audio_path = None
             if audio_media_id:
@@ -641,11 +650,82 @@ async def _assemble_videos_impl(
             session.commit()
             session.refresh(node)
             
-        # 7. Run compilation in separate thread (passing aligned narrations and node_id)
+        # 6.5. Generate AI transition clips if enabled
+        final_video_paths = []
+        final_narrations = []
+        
+        for index, info in enumerate(video_info):
+            final_video_paths.append(info["path"])
+            final_narrations.append(info["narration"])
+            
+            if ai_transition and index < len(video_info) - 1:
+                media_id = info["media_id"]
+                next_info = video_info[index + 1]
+                next_media_id = next_info["media_id"]
+                logger.info(f"Generating AI transition between {media_id} and {next_media_id}")
+                
+                try:
+                    # Update status in db for user visibility
+                    with get_session() as s:
+                        db_node = s.get(Node, node_id)
+                        if db_node:
+                            node_data = dict(db_node.data or {})
+                            node_data["assemblyProgress"] = int((index + 0.5) / len(video_info) * 80)
+                            db_node.data = node_data
+                            s.add(db_node)
+                            s.commit()
+
+                    # Extract last frame of current video and upload
+                    start_img_id = await media_service.extract_last_frame_and_upload(media_id, project_id)
+                    # Extract first frame of next video and upload
+                    end_img_id = await media_service.extract_first_frame_and_upload(next_media_id, project_id)
+                    
+                    # Call gen_video with start and end images
+                    from flowboard.services.pipeline_executor import _create_request_row, _await_request
+                    from flowboard.worker import get_worker
+                    
+                    vid_aspect = "VIDEO_ASPECT_RATIO_LANDSCAPE"
+                    if resolved_aspect_ratio == "9:16":
+                        vid_aspect = "VIDEO_ASPECT_RATIO_PORTRAIT"
+                    
+                    params = {
+                        "prompt": "smooth camera panning transition, continuous motion",
+                        "project_id": project_id,
+                        "start_media_id": start_img_id,
+                        "end_media_id": end_img_id,
+                        "paygate_tier": paygate_tier,
+                        "video_quality": "fast",
+                        "aspect_ratio": vid_aspect,
+                    }
+                    
+                    req_id = _create_request_row(node_id=None, req_type="gen_video", params=params)
+                    get_worker().enqueue(req_id)
+                    
+                    settled_req = await _await_request(req_id, timeout_s=180.0, poll_s=2.0)
+                    if settled_req.status == "done":
+                        res_media_id = next((m for m in (settled_req.result or {}).get("media_ids", []) if m), None)
+                        if res_media_id:
+                            await media_service.fetch_and_cache(res_media_id)
+                            trans_path = media_service.cached_path(res_media_id)
+                            if trans_path and trans_path.exists():
+                                final_video_paths.append(str(trans_path))
+                                final_narrations.append("")
+                                logger.info(f"AI transition video generated successfully: {res_media_id}")
+                            else:
+                                logger.error(f"Failed to cache transition video {res_media_id}")
+                        else:
+                            logger.error("Transition generation succeeded but returned no media ID")
+                        # Delete temp start/end assets so they don't clutter the flow project
+                        # (out of scope for basic implementation, can be kept)
+                    else:
+                        logger.error(f"AI Transition generation failed or timed out: {settled_req.error}")
+                except Exception as trans_err:
+                    logger.error(f"Error generating AI transition: {trans_err}", exc_info=True)
+
         # 7. Run compilation
         await _run_ffmpeg_assembly(
-            video_paths,
-            narrations,
+            final_video_paths,
+            final_narrations,
             audio_path,
             str(output_path),
             node_id,

@@ -228,3 +228,107 @@ def _mime_from_ext(ext: str) -> str:
         if e == ext:
             return mime
     return "application/octet-stream"
+
+
+async def extract_last_frame_and_upload(video_media_id: str, project_id: str) -> str:
+    """Extracts the last frame of a video asset and uploads it to Flow as an image."""
+    from sqlmodel import select
+    from flowboard.db.models import Asset
+    from flowboard.services.flow_sdk import get_flow_sdk, _extract_uploaded_media_id
+    import subprocess
+    import tempfile
+    import os
+    import base64
+    
+    with get_session() as s:
+        asset = s.exec(select(Asset).where(Asset.uuid_media_id == video_media_id)).first()
+        if not asset or asset.kind != "video" or not asset.local_path:
+            return video_media_id
+
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_out:
+        out_path = tmp_out.name
+    
+    try:
+        cmd = [
+            "ffmpeg", "-y", "-sseof", "-0.1", "-i", asset.local_path,
+            "-update", "1", "-q:v", "2", out_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        
+        with open(out_path, "rb") as f:
+            b64_data = base64.b64encode(f.read()).decode("utf-8")
+            
+        sdk = get_flow_sdk()
+        resp = await sdk.upload_image(
+            b64_data=b64_data,
+            project_id=project_id,
+            mime_type="image/jpeg",
+            file_name=f"extend_{video_media_id}.jpg"
+        )
+        if "error" in resp:
+            logger.error(f"Failed to upload extracted frame: {resp['error']}")
+            return video_media_id
+            
+        new_media_id = _extract_uploaded_media_id(resp)
+        if not new_media_id:
+            return video_media_id
+            
+        return new_media_id
+    except Exception as e:
+        logger.error(f"Failed to extract/upload last frame: {e}")
+        return video_media_id
+    finally:
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+async def extract_first_frame_and_upload(video_media_id: str, project_id: str) -> str:
+    """Extracts the first frame of a video asset and uploads it to Flow as an image."""
+    from sqlmodel import select
+    from flowboard.db.models import Asset
+    from flowboard.services.flow_sdk import get_flow_sdk, _extract_uploaded_media_id
+    import subprocess
+    import tempfile
+    import os
+    import base64
+    
+    with get_session() as s:
+        asset = s.exec(select(Asset).where(Asset.uuid_media_id == video_media_id)).first()
+        if not asset or asset.kind != "video" or not asset.local_path:
+            return video_media_id
+
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_out:
+        out_path = tmp_out.name
+    
+    try:
+        cmd = [
+            "ffmpeg", "-y", "-i", asset.local_path,
+            "-vframes", "1", "-q:v", "2", out_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        
+        with open(out_path, "rb") as f:
+            b64_data = base64.b64encode(f.read()).decode("utf-8")
+            
+        sdk = get_flow_sdk()
+        resp = await sdk.upload_image(
+            b64_data=b64_data,
+            project_id=project_id,
+            mime_type="image/jpeg",
+            file_name=f"first_{video_media_id}.jpg"
+        )
+        if "error" in resp:
+            logger.error(f"Failed to upload extracted first frame: {resp['error']}")
+            return video_media_id
+            
+        new_media_id = _extract_uploaded_media_id(resp)
+        if not new_media_id:
+            return video_media_id
+            
+        return new_media_id
+    except Exception as e:
+        logger.error(f"Failed to extract/upload first frame: {e}")
+        return video_media_id
+    finally:
+        if os.path.exists(out_path):
+            os.unlink(out_path)
