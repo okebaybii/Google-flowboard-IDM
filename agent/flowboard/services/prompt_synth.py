@@ -629,19 +629,27 @@ async def auto_prompt_batch(
         },
         node_id=node_id,
     ) as activity:
-        try:
-            # 120s for the batch path — Gemini CLI's `-p` invocation
-            # pays ~15s of subprocess + auth cold-start, then a heavy
-            # multi-variant batch composition can run another 60-90s of
-            # inference. The single-variant path (auto_prompt below) is
-            # lighter and uses a tighter 90s ceiling. Claude Code
-            # finishes the same call in 5-15s; we err on Gemini's side
-            # so feature parity holds across providers.
-            text = await run_llm(
-                "auto_prompt", user_msg, system_prompt=system_prompt, timeout=120.0
-            )
-        except LLMError as exc:
-            raise PromptSynthError(f"auto-prompt provider failed: {exc}") from exc
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # 120s for the batch path — Gemini CLI's `-p` invocation
+                # pays ~15s of subprocess + auth cold-start, then a heavy
+                # multi-variant batch composition can run another 60-90s of
+                # inference. The single-variant path (auto_prompt below) is
+                # lighter and uses a tighter 90s ceiling. Claude Code
+                # finishes the same call in 5-15s; we err on Gemini's side
+                # so feature parity holds across providers.
+                text = await run_llm(
+                    "auto_prompt", user_msg, system_prompt=system_prompt, timeout=120.0
+                )
+                break
+            except LLMError as exc:
+                err_str = str(exc)
+                if attempt < max_retries - 1 and ("503" in err_str or "high demand" in err_str.lower() or "too many requests" in err_str.lower() or "429" in err_str):
+                    import asyncio
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                raise PromptSynthError(f"auto-prompt provider failed: {exc}") from exc
 
         text = (text or "").strip()
         # Strip markdown fences if the provider added them despite instructions.
@@ -715,19 +723,27 @@ async def auto_prompt(
         },
         node_id=node_id,
     ) as activity:
-        try:
-            # 90s — same Gemini cold-start rationale as the batch path
-            # (~15s spawn + 30-60s inference for a complex composition).
-            # Single-variant is lighter than batch so a slightly tighter
-            # ceiling is fine, but 30s was too aggressive.
-            text = await run_llm(
-                "auto_prompt",
-                user_msg,
-                system_prompt=system_prompt,
-                timeout=90.0,
-            )
-        except LLMError as exc:
-            raise PromptSynthError(f"auto-prompt provider failed: {exc}") from exc
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # 90s — same Gemini cold-start rationale as the batch path
+                # (~15s spawn + 30-60s inference for a complex composition).
+                # Single-variant is lighter than batch so a slightly tighter
+                # ceiling is fine, but 30s was too aggressive.
+                text = await run_llm(
+                    "auto_prompt",
+                    user_msg,
+                    system_prompt=system_prompt,
+                    timeout=90.0,
+                )
+                break
+            except LLMError as exc:
+                err_str = str(exc)
+                if attempt < max_retries - 1 and ("503" in err_str or "high demand" in err_str.lower() or "too many requests" in err_str.lower() or "429" in err_str):
+                    import asyncio
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                raise PromptSynthError(f"auto-prompt provider failed: {exc}") from exc
 
         text = (text or "").strip().strip('"').strip("'")
         if not text:

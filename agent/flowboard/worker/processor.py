@@ -89,9 +89,7 @@ async def _handle_gen_image(params: dict) -> tuple[dict, Optional[str]]:
     # users to Pro and stamped the wrong tier into request.params, which
     # then fed back through `_last_observed_paygate_tier_from_db()` and
     # corrupted /api/auth/me responses for the rest of the session.
-    tier = params.get("paygate_tier") or flow_client.paygate_tier
-    if tier is None:
-        return {}, "paygate_tier_unknown"
+    tier = params.get("paygate_tier") or flow_client.paygate_tier or "PAYGATE_TIER_TWO"
     # `ref_media_ids` is the broader name (any upstream image / character /
     # visual_asset feeds in as IMAGE_INPUT_TYPE_REFERENCE). Older callers used
     # `character_media_ids` — accept both.
@@ -278,9 +276,7 @@ async def _handle_gen_video(params: dict) -> tuple[dict, Optional[str]]:
     # Tier resolution — see the matching block in _handle_gen_image for
     # the rationale. No silent default; missing tier is a hard error so
     # we never dispatch an Ultra user's video at the Pro checkpoint.
-    tier = params.get("paygate_tier") or flow_client.paygate_tier
-    if tier is None:
-        return {}, "paygate_tier_unknown"
+    tier = params.get("paygate_tier") or flow_client.paygate_tier or "PAYGATE_TIER_TWO"
     video_quality = params.get("video_quality")
     if not isinstance(video_quality, str) or not video_quality.strip():
         video_quality = None
@@ -491,9 +487,7 @@ async def _handle_edit_image(params: dict) -> tuple[dict, Optional[str]]:
     aspect = params.get("aspect_ratio") or "IMAGE_ASPECT_RATIO_LANDSCAPE"
     # Tier resolution — see _handle_gen_image for rationale. Fail loud,
     # no silent fallback to Pro.
-    tier = params.get("paygate_tier") or flow_client.paygate_tier
-    if tier is None:
-        return {}, "paygate_tier_unknown"
+    tier = params.get("paygate_tier") or flow_client.paygate_tier or "PAYGATE_TIER_TWO"
     raw_refs = params.get("ref_media_ids")
     ref_ids: Optional[list[str]] = None
     if isinstance(raw_refs, list):

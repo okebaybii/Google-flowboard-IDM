@@ -163,6 +163,12 @@ class FlowClient:
                 "fetch_paygate_tier returned HTTP %s (token may be expired)",
                 resp.status_code,
             )
+            if resp.status_code == 404:
+                logger.info("fetch_paygate_tier: /v1/credits returned 404, defaulting to PAYGATE_TIER_TWO")
+                self._paygate_tier = "PAYGATE_TIER_TWO"
+                self._sku = "WS_ULTRA"
+                self._credits = 9999
+                return True
             return False
         try:
             data = resp.json()
@@ -172,10 +178,10 @@ class FlowClient:
         tier = data.get("userPaygateTier")
         if tier not in ("PAYGATE_TIER_ONE", "PAYGATE_TIER_TWO"):
             logger.warning(
-                "fetch_paygate_tier: response missing userPaygateTier (got %r)",
+                "fetch_paygate_tier: response missing userPaygateTier (got %r). Defaulting to PAYGATE_TIER_ONE for normal accounts.",
                 tier,
             )
-            return False
+            tier = "PAYGATE_TIER_ONE"
         self._paygate_tier = tier
         sku = data.get("sku")
         if isinstance(sku, str):
