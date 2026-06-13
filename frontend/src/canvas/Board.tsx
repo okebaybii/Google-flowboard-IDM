@@ -19,6 +19,7 @@ import { useBoardStore, type FlowNode, type NodeType } from "../store/board";
 import { NodeCard } from "./NodeCard";
 import { VariantEdge } from "./VariantEdge";
 import { useGenerationStore } from "../store/generation";
+import { getActivityList } from "../api/client";
 
 const nodeTypes = {
   character: NodeCard,
@@ -370,17 +371,48 @@ export function Board() {
     return () => el.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  // Poll board state periodically when any node is running (e.g. video_assembly is compiling)
+  // Live canvas sync. Server-side generations — Video Assembly "Generate
+  // All", story-chain auto-trigger, and the downstream video cascade —
+  // update node media on the backend WITHOUT the frontend dispatching them.
+  // The old check ("poll only while a LOCAL node is running") never fired
+  // for those: the local node stays "idle", so finished images/videos
+  // stayed invisible until a manual F5. Drive the poll from the activity
+  // feed instead (the server's source of truth): whenever the backend has
+  // any queued/running request, refresh the board. One extra refresh on the
+  // active→idle edge captures the final "done" media. Local running/queued
+  // nodes also count, so manually-dispatched work stays live immediately.
   useEffect(() => {
-    const hasRunningNode = nodes.some((n) => n.data.status === "running");
-    if (!hasRunningNode) return;
-
-    const timer = setInterval(() => {
-      void useBoardStore.getState().refreshBoardState();
-    }, 1500);
-
-    return () => clearInterval(timer);
-  }, [nodes]);
+    let alive = true;
+    let wasActive = false;
+    const tick = async () => {
+      if (!alive) return;
+      let active = false;
+      try {
+        const { items } = await getActivityList({ limit: 20 });
+        active = items.some(
+          (it) => it.status === "queued" || it.status === "running",
+        );
+      } catch {
+        // Network hiccup — fall back to local node status below.
+      }
+      if (!active) {
+        active = useBoardStore
+          .getState()
+          .nodes.some(
+            (n) => n.data.status === "running" || n.data.status === "queued",
+          );
+      }
+      if (active || wasActive) {
+        await useBoardStore.getState().refreshBoardState();
+      }
+      wasActive = active;
+    };
+    const timer = setInterval(tick, 2500);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, []);
 
   return (
     <div

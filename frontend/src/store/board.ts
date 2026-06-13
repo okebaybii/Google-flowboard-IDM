@@ -420,15 +420,15 @@ export const useBoardStore = create<BoardState>((set, get) => ({
   },
 
   async refreshBoardState() {
-    const { boardId } = get();
+    const { boardId, nodes: localNodes } = get();
     if (boardId === null) return;
     try {
       const detail = await getBoard(boardId);
-      const nodes: FlowNode[] = detail.nodes.map((n) => ({
-        id: String(n.id),
-        type: n.type,
-        position: { x: n.x, y: n.y },
-        data: {
+      const localById = new Map(localNodes.map((n) => [n.id, n]));
+      const nodes: FlowNode[] = detail.nodes.map((n) => {
+        const id = String(n.id);
+        // Full server view of the node's data.
+        const serverData = {
           type: n.type,
           shortId: n.short_id,
           title: (n.data["title"] as string | undefined) ?? TYPE_TITLE[n.type],
@@ -455,8 +455,46 @@ export const useBoardStore = create<BoardState>((set, get) => ({
           retryFailedClips: n.data["retryFailedClips"] as boolean | undefined,
           assemblyProgress: n.data["assemblyProgress"] as number | undefined,
           sampleVideoUrl: n.data["sampleVideoUrl"] as string | undefined,
-        },
-      }));
+        };
+
+        const local = localById.get(id);
+        if (!local) {
+          // Node the frontend hasn't seen yet (e.g. spawned by story_script
+          // on the backend) — take the full server view.
+          return {
+            id,
+            type: n.type,
+            position: { x: n.x, y: n.y },
+            data: serverData,
+          };
+        }
+
+        // Existing node: this is a live-sync refresh that can fire every few
+        // seconds while a generation runs. Overlay ONLY server-owned
+        // generation-result fields so finished media appears immediately,
+        // while keeping everything the user is actively touching:
+        //  - local position (drags persist via onNodeDragStop; avoids jumpiness)
+        //  - local prompt / title / settings (don't clobber in-progress typing)
+        //  - React Flow per-node UI state (selection, dragging, measured size)
+        //    preserved by spreading the existing node object.
+        return {
+          ...local,
+          type: n.type,
+          data: {
+            ...local.data,
+            status: serverData.status,
+            mediaId: serverData.mediaId,
+            mediaIds: serverData.mediaIds,
+            slotErrors: serverData.slotErrors,
+            variantCount: serverData.variantCount ?? local.data.variantCount,
+            thumbnailUrl: serverData.thumbnailUrl ?? local.data.thumbnailUrl,
+            error: serverData.error,
+            errorHint: serverData.errorHint,
+            batchGenerating: serverData.batchGenerating,
+            assemblyProgress: serverData.assemblyProgress,
+          },
+        };
+      });
       const edges: Edge[] = detail.edges.map(edgeFromDto);
       set({ nodes, edges });
     } catch {
