@@ -59,3 +59,7 @@ agent/temp_tts_*.mp3
 temp_test_*.mp3
 *.mp3
 
+# Local scratch / debug scripts (not part of the app)
+scratch/
+scratch_inspect.py
+

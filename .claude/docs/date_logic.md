@@ -1,17 +1,29 @@
-# Date & Allocation Logic
+# Generation & Pipeline Logic
 
-## Mathematical Core
-For any subtask `i`:
-```javascript
-const sumOfWeights = subtasks.reduce((sum, task) => sum + task.weight, 0);
-const rawDuration = (subtask[i].weight / sumOfWeights) * goal.totalDuration;
-const allocatedDuration = Math.round(rawDuration * 10) / 10; // Rounded to 1 decimal
-```
+## Generation Request Lifecycle
+A generation `Request` (see `db/models.py`) moves through:
+`queued` → `running` → `succeeded` | `failed`.
 
-## Timeline Sequencing
-1. The first subtask starts at `goal.startDate`.
-2. The end date of subtask `i` is `startDate + allocatedDuration`.
-3. The start date of subtask `i+1` is exactly the end date of subtask `i`.
+- On agent restart, any orphaned `running` requests are force-failed with error
+  `agent_restart_lost` (`main.py:_recover_orphan_running_requests`) so nodes don't poll a
+  request nobody is processing.
+- The worker (`worker/processor.py`) supports infinite/most retries for sequential
+  generation and graceful degrade across paygate tiers (PAYGATE_TIER_ONE / TIER_TWO).
 
-## Edge Cases
-- When adding decimals, rounding errors can compound. Implement a check to ensure the final subtask's end date does not exceed the goal's total duration. Adjust the final subtask's duration if necessary to consume the remainder.
+## Storyboard Sequencing
+- Storyboard nodes generate 1–8 consecutive scene images, controlled by a BFS over the
+  graph; failed scenes are automatically regenerated.
+- Composed-image nodes combine upstream reference nodes (character + visual asset) so
+  identity stays consistent across frames.
+
+## Audio / Video Sync (Dynamic Speed Stretching)
+When muxing voice-over onto a clip (`routes/ffmpeg_assembly.py`, `routes/video_assembly.py`):
+1. Measure the AI voice-over (Edge TTS) duration.
+2. Stretch the video speed (slow motion) or hold the final frame (Hybrid Freeze Frame) so
+   audio and video end together.
+3. ffmpeg concatenates segments and muxes the audio track; if there is no audio, a silent
+   stereo track (`anullsrc`, 24kHz) is generated to keep streams aligned.
+
+## Social Scheduling
+- `worker/social_scheduler.py` runs every 60s, finds due `SocialBlockPost` rows, and
+  publishes them to the configured Facebook Page (`FB_PAGE__ID` / `FB_PAGE__ACCESS_TOKEN`).

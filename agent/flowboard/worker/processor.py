@@ -68,6 +68,37 @@ async def _handle_create_project(params: dict) -> tuple[dict, Optional[str]]:
     return resp, None
 
 
+async def _resolve_paygate_tier(params: dict) -> Optional[str]:
+    """Resolve the account's paygate tier, auto-detecting it per account.
+
+    Resolution priority:
+      1. `params["paygate_tier"]` — caller intent stamped at dispatch.
+      2. `flow_client.paygate_tier` — cached from the authoritative live
+         `/v1/credits` lookup (populated on token capture).
+      3. An on-demand live fetch — when the cache is cold but the extension
+         has pushed a Bearer token, auto-detect the tier for THIS account
+         instead of guessing.
+
+    Returns ``None`` when the tier genuinely cannot be determined (no token
+    yet). Callers MUST fail loud with ``paygate_tier_unknown`` rather than
+    defaulting — a wrong tier silently downgrades Ultra accounts to Pro and
+    stamps the bad value into request.params, which then feeds back through
+    `_last_observed_paygate_tier_from_db()` and corrupts /api/auth/me for
+    the rest of the session. This is the Phase-1 fail-loud contract.
+    """
+    tier = params.get("paygate_tier") or flow_client.paygate_tier
+    if tier:
+        return tier
+    # Cache is cold — try to auto-detect from the authoritative per-account
+    # source before giving up. No-ops (returns False) when no token is cached.
+    try:
+        if await flow_client.fetch_paygate_tier():
+            return flow_client.paygate_tier
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("paygate tier auto-detect failed: %s", exc)
+    return None
+
+
 async def _handle_gen_image(params: dict) -> tuple[dict, Optional[str]]:
     from flowboard.services.flow_sdk import is_valid_project_id
 
@@ -81,15 +112,14 @@ async def _handle_gen_image(params: dict) -> tuple[dict, Optional[str]]:
     if not is_valid_project_id(project_id):
         return {}, "invalid_project_id"
     aspect = params.get("aspect_ratio") or "IMAGE_ASPECT_RATIO_LANDSCAPE"
-    # Tier resolution: caller-stamped value first (set at dispatch time),
-    # then the live value from `flow_client` (resolved authoritatively
-    # via /v1/credits on token capture). NO silent default — if both
-    # are absent we fail loud with `paygate_tier_unknown`. The old
-    # behaviour (default `PAYGATE_TIER_ONE`) silently downgraded Ultra
-    # users to Pro and stamped the wrong tier into request.params, which
-    # then fed back through `_last_observed_paygate_tier_from_db()` and
-    # corrupted /api/auth/me responses for the rest of the session.
-    tier = params.get("paygate_tier") or flow_client.paygate_tier or "PAYGATE_TIER_TWO"
+    # Tier resolution: caller-stamped → cached → live auto-detect per account.
+    # NO silent default — if the tier genuinely cannot be determined we fail
+    # loud with `paygate_tier_unknown` (Phase-1 contract). The regressed
+    # behaviour (default `PAYGATE_TIER_TWO`) silently mis-tiered accounts and
+    # poisoned /api/auth/me for the rest of the session. See `_resolve_paygate_tier`.
+    tier = await _resolve_paygate_tier(params)
+    if not tier:
+        return {}, "paygate_tier_unknown"
     # `ref_media_ids` is the broader name (any upstream image / character /
     # visual_asset feeds in as IMAGE_INPUT_TYPE_REFERENCE). Older callers used
     # `character_media_ids` — accept both.
@@ -182,7 +212,7 @@ async def _extract_last_frame_and_upload(video_media_id: str, project_id: str) -
     """Extracts the last frame of a video asset and uploads it to Flow as an image."""
     from sqlmodel import select
     from flowboard.db.models import Asset
-    from flowboard.services.flow_sdk import get_flow_sdk, _extract_uploaded_media_id
+    from flowboard.services.flow_sdk import get_flow_sdk
     import subprocess
     import tempfile
     import os
@@ -207,8 +237,12 @@ async def _extract_last_frame_and_upload(video_media_id: str, project_id: str) -
             b64_data = base64.b64encode(f.read()).decode("utf-8")
             
         sdk = get_flow_sdk()
+        # upload_image's parameter is `image_base64` and it returns
+        # {raw, media_id} (media_id already extracted). Passing `b64_data`
+        # raised TypeError against the real SDK, which the broad except below
+        # swallowed — silently breaking the extend-video feature.
         resp = await sdk.upload_image(
-            b64_data=b64_data,
+            image_base64=b64_data,
             project_id=project_id,
             mime_type="image/jpeg",
             file_name=f"extend_{video_media_id}.jpg"
@@ -216,8 +250,8 @@ async def _extract_last_frame_and_upload(video_media_id: str, project_id: str) -
         if "error" in resp:
             logger.error(f"Failed to upload extracted frame: {resp['error']}")
             return video_media_id
-            
-        new_media_id = _extract_uploaded_media_id(resp)
+
+        new_media_id = resp.get("media_id")
         if not new_media_id:
             return video_media_id
             
@@ -273,10 +307,12 @@ async def _handle_gen_video(params: dict) -> tuple[dict, Optional[str]]:
     ):
         return {}, "missing_start_media_id"
     aspect = params.get("aspect_ratio") or "VIDEO_ASPECT_RATIO_LANDSCAPE"
-    # Tier resolution — see the matching block in _handle_gen_image for
-    # the rationale. No silent default; missing tier is a hard error so
+    # Tier resolution — see _resolve_paygate_tier / _handle_gen_image for the
+    # rationale. No silent default; an undeterminable tier is a hard error so
     # we never dispatch an Ultra user's video at the Pro checkpoint.
-    tier = params.get("paygate_tier") or flow_client.paygate_tier or "PAYGATE_TIER_TWO"
+    tier = await _resolve_paygate_tier(params)
+    if not tier:
+        return {}, "paygate_tier_unknown"
     video_quality = params.get("video_quality")
     if not isinstance(video_quality, str) or not video_quality.strip():
         video_quality = None
@@ -485,9 +521,11 @@ async def _handle_edit_image(params: dict) -> tuple[dict, Optional[str]]:
     if not isinstance(source_media_id, str) or not source_media_id.strip():
         return {}, "missing_source_media_id"
     aspect = params.get("aspect_ratio") or "IMAGE_ASPECT_RATIO_LANDSCAPE"
-    # Tier resolution — see _handle_gen_image for rationale. Fail loud,
+    # Tier resolution — see _resolve_paygate_tier for rationale. Fail loud,
     # no silent fallback to Pro.
-    tier = params.get("paygate_tier") or flow_client.paygate_tier or "PAYGATE_TIER_TWO"
+    tier = await _resolve_paygate_tier(params)
+    if not tier:
+        return {}, "paygate_tier_unknown"
     raw_refs = params.get("ref_media_ids")
     ref_ids: Optional[list[str]] = None
     if isinstance(raw_refs, list):
@@ -581,10 +619,16 @@ def _trigger_downstream_videos(source_node_id: int, start_media_id: str) -> None
             
             # Process each downstream node
             for edge in edges:
+                # `fallback-start-image` edges only supply a fallback start
+                # frame to a clip; they must NOT themselves trigger generation
+                # (that clip is driven by its own main upstream edge).
+                if edge.target_handle == "fallback-start-image":
+                    continue
+
                 target_node = s.get(Node, edge.target_id)
                 if not target_node:
                     continue
-                
+
                 # Only auto-trigger Video nodes
                 if target_node.type != "video":
                     continue

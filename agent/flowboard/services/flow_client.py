@@ -177,11 +177,15 @@ class FlowClient:
             return False
         tier = data.get("userPaygateTier")
         if tier not in ("PAYGATE_TIER_ONE", "PAYGATE_TIER_TWO"):
+            # Unknown / missing tier value (e.g. a future PAYGATE_TIER_THREE or
+            # a Flow API contract change). Do NOT guess — leave the cache
+            # untouched and report failure so callers fail loud rather than
+            # stamping a wrong tier. See test_auth::...rejects_unknown_tier_value.
             logger.warning(
-                "fetch_paygate_tier: response missing userPaygateTier (got %r). Defaulting to PAYGATE_TIER_ONE for normal accounts.",
+                "fetch_paygate_tier: unexpected userPaygateTier=%r; leaving tier unresolved",
                 tier,
             )
-            tier = "PAYGATE_TIER_ONE"
+            return False
         self._paygate_tier = tier
         sku = data.get("sku")
         if isinstance(sku, str):

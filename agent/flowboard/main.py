@@ -202,9 +202,18 @@ app = FastAPI(
     dependencies=[Depends(check_active_session_globally)]
 )
 
+# NOTE: the browser rejects `allow_origins=["*"]` together with
+# `allow_credentials=True`. Flowboard only ever runs on loopback (the Vite dev
+# server on :1234 and the bundled EXE serving the SPA from :8101), so list those
+# origins explicitly to keep credentialed requests valid.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:1234",
+        "http://127.0.0.1:1234",
+        "http://localhost:8101",
+        "http://127.0.0.1:8101",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

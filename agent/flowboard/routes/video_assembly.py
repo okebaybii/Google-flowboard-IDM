@@ -3,6 +3,7 @@ from .ffmpeg_assembly import _run_ffmpeg_assembly
 
 Concatenates multiple upstream video node clips and overlays an uploaded audio file.
 """
+import os
 import uuid
 import logging
 import asyncio
@@ -19,6 +20,14 @@ from flowboard.config import STORAGE_DIR
 from flowboard.services import media as media_service
 
 logger = logging.getLogger(__name__)
+
+# Max generation attempts per node inside a batch run before giving up and
+# letting the batch continue (so downstream clips can fall back). Bounded on
+# purpose — see run_batch_generation. Override with FLOWBOARD_BATCH_MAX_ATTEMPTS.
+try:
+    BATCH_NODE_MAX_ATTEMPTS = max(1, int(os.getenv("FLOWBOARD_BATCH_MAX_ATTEMPTS", "5")))
+except ValueError:
+    BATCH_NODE_MAX_ATTEMPTS = 5
 
 router = APIRouter(prefix="/api/video-assembly", tags=["video-assembly"])
 
@@ -1046,27 +1055,52 @@ async def run_batch_generation(
                         logger.info(f"Node {nid} is already done. Skipping.")
                         continue
                     if node.status == "error" and media_id and not retry_failed:
-                        logger.info(f"Node {nid} is error but already has media. Skipping.")
-                        failed_nodes.add(nid)
-                        continue
-                        
-                    # Upstream failure check
-                    parent_edges = incoming[nid]
-                    parent_ids = [edge.source_id for edge in parent_edges]
-                    upstream_failed = any(p in failed_nodes for p in parent_ids)
-                    if upstream_failed:
-                        failed_nodes.add(nid)
-                        node.status = "error"
-                        node.data = {
-                            **dict(node.data), 
-                            "error": "upstream_failed",
-                            "errorHint": "Clip trước đó bị lỗi, không thể tiếp tục tạo clip này."
-                        }
+                        # Clip errored previously but already rendered media —
+                        # reuse it (clear the stale error, mark done) instead of
+                        # regenerating, so the batch and assembly can proceed.
+                        logger.info(f"Node {nid} errored but already has media — reusing.")
+                        node.status = "done"
+                        reused = dict(node.data)
+                        reused.pop("error", None)
+                        reused.pop("errorHint", None)
+                        node.data = reused
                         session.add(node)
                         session.commit()
+                        node_map[nid] = node
                         continue
+
+                    # Upstream failure check. If a parent clip failed but this
+                    # node still has a usable fallback start image (a non-failed
+                    # parent that provides media, e.g. a `fallback-start-image`
+                    # edge), continue and let it fall back. Only abort when no
+                    # fallback media is available.
+                    parent_edges = incoming[nid]
+                    parent_ids = [edge.source_id for edge in parent_edges]
+                    if any(p in failed_nodes for p in parent_ids):
+                        has_fallback = False
+                        for edge in parent_edges:
+                            if edge.source_id in failed_nodes:
+                                continue
+                            p_node = session.get(Node, edge.source_id)
+                            if p_node and _select_node_media_id(p_node, edge):
+                                has_fallback = True
+                                break
+                        if not has_fallback:
+                            failed_nodes.add(nid)
+                            node.status = "error"
+                            node.data = {
+                                **dict(node.data),
+                                "error": "upstream_failed",
+                                "errorHint": "Clip trước đó bị lỗi, không thể tiếp tục tạo clip này."
+                            }
+                            session.add(node)
+                            session.commit()
+                            continue
+                        logger.info(f"Node {nid}: upstream clip failed; falling back to start image.")
                         
                     prompt = node.data.get("prompt", "").strip()
+                    # Captured for payload stabilization on internal-error retries.
+                    source_video_prompt = (node.data.get("sourceVideoPrompt") or "").strip()
                     if not prompt:
                         failed_nodes.add(nid)
                         node.status = "error"
@@ -1236,8 +1270,12 @@ async def run_batch_generation(
                                 params["start_media_id"] = start_media_ids[0]
                             req_type = "gen_video"
 
-                # Retry indefinitely (up to 9999 times) as requested by user
-                max_attempts = 9999
+                # Retry generously on transient failures, but BOUNDED — a
+                # permanently-failing node (e.g. repeated CAPTCHA_FAILED) must
+                # eventually give up so the batch can continue to the next clip
+                # and downstream nodes can fall back to their start image.
+                # An unbounded loop here would hang the whole batch forever.
+                max_attempts = BATCH_NODE_MAX_ATTEMPTS
                 settled = None
                 error_message = "generation failed"
                 success = False
@@ -1287,7 +1325,23 @@ async def run_batch_generation(
                     except Exception as ex:
                         error_message = str(ex) or repr(ex)
                         logger.warning(f"Node {nid} attempt {attempt_idx + 1} raised error: {ex}")
-                    
+
+                    # On internal/transient video errors, stabilize the payload
+                    # for the next attempt: drop to "fast" quality and a simpler,
+                    # stable image-to-video prompt to coax a successful render.
+                    if (
+                        not success
+                        and req_type == "gen_video"
+                        and "internal error" in (error_message or "").lower()
+                    ):
+                        params = dict(params)
+                        params["video_quality"] = "fast"
+                        stable = "Generate a stable short image-to-video clip"
+                        params["prompt"] = (
+                            f"{stable}. {source_video_prompt}"
+                            if source_video_prompt else stable
+                        )
+
                     if attempt_idx < max_attempts - 1:
                         # Brief sleep between retries
                         await asyncio.sleep(2.0)

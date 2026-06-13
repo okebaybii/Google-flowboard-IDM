@@ -1,13 +1,26 @@
-# State Management
+# State Management (Frontend)
 
 ## Store Structure
-The state must centrally hold:
-- `goal`: { startDate, totalDuration, unit }
-- `subtasks`: Array of { id, title, weight }
+Frontend state lives in Zustand stores under `frontend/src/store/`, one slice per domain:
+- `board` — nodes, edges, selection, canvas viewport (the React Flow graph).
+- `generation` — in-flight generation requests and their polling status.
+- `pipeline` — multi-step pipeline runs across connected nodes.
+- `chat` — AI chat sidebar messages.
+- `references` — uploaded character / visual-asset reference nodes.
+- `socialBlock` — social-post composition and scheduling state.
+- `settings` — AI provider config, members, social accounts.
+- `auth` — Firebase auth/session state.
 
 ## Data Flow
-- User mutations update the raw input values (weights, start date).
-- **Derived State**: Do not store the computed start and end dates of subtasks in the raw state. Instead, calculate these on the fly using selectors or memoized hooks to ensure they are always strictly synchronized with the raw inputs.
+- The canvas (`canvas/Board.tsx`) reads graph state from the `board` store and dispatches
+  mutations on user interaction (add/move/connect nodes).
+- API calls go through `api/client.ts`; results update the relevant store, which re-renders
+  subscribed components.
+- **Derived state**: computed values (e.g. node readiness, pipeline progress) are derived
+  from raw store state via selectors — do not duplicate server-owned truth in the client.
 
 ## Mutation Rules
-- Adding or removing a subtask must automatically trigger a re-computation of the `sum of all weights` in derived state.
+- Node/edge mutations should round-trip to the backend (`routes/nodes.py`, `routes/edges.py`)
+  so the SQLite graph stays the source of truth; the store mirrors it.
+- Generation status is owned by the backend `Request` table; the frontend polls/subscribes
+  rather than inventing its own status transitions.

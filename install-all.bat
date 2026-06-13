@@ -23,6 +23,18 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+REM Check for ffmpeg (required for video assembly / audio muxing)
+ffmpeg -version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [WARNING] ffmpeg is not installed or not in PATH!
+    echo Video assembly and audio muxing features will NOT work without it.
+    echo Install it from https://ffmpeg.org/download.html and add it to PATH,
+    echo or via winget:  winget install Gyan.FFmpeg
+    echo.
+    echo Press any key to continue installation anyway...
+    pause >nul
+)
+
 echo [1/2] Installing Backend (Agent) dependencies...
 cd /d "%~dp0\agent"
 if exist ".venv" (
