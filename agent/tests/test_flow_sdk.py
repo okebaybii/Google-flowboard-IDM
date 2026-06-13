@@ -193,6 +193,13 @@ def test_client_context_rejects_invalid_paygate_tier():
     two = _client_context("p", "PAYGATE_TIER_TWO")
     assert two["userPaygateTier"] == "PAYGATE_TIER_TWO"
 
+    # Free (unpaid) accounts report PAYGATE_TIER_NOT_PAID. There's no
+    # Free model family, so the chokepoint maps it to the Pro (TIER_ONE)
+    # request shape and lets Google Flow enforce real entitlement. This
+    # is the ONLY remapped value — paid tiers are never coerced.
+    free = _client_context("p", "PAYGATE_TIER_NOT_PAID")
+    assert free["userPaygateTier"] == "PAYGATE_TIER_ONE"
+
     # Unknown / malformed values raise loudly (not silent coerce).
     for bad in ("PAYGATE_TIER_THREE", "", "<script>", "PAYGATE_TIER_FREE"):
         with _pytest.raises(ValueError, match="invalid paygate_tier"):

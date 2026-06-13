@@ -167,6 +167,19 @@ function connectToAgent() {
     chrome.alarms.clear('reconnect');
     setState('idle');
 
+    // Clear a stale WS_ERROR now that the connection is healthy again.
+    // `onerror` persists `lastError = 'WS_ERROR'` to chrome.storage when
+    // the agent is down (e.g. before `start-all.bat` boots the backend).
+    // It was only ever reset on a *successful API request*, so an account
+    // that hadn't generated anything yet (e.g. a fresh Free account) kept
+    // showing "Error WS_ERROR" in the popup forever, even after the agent
+    // came up and the WS reconnected. A live connection means the
+    // connection error is resolved — drop the stale flag.
+    if (metrics.lastError === 'WS_ERROR') {
+      metrics.lastError = null;
+      chrome.storage.local.set({ metrics });
+    }
+
     const tokenAge = flowKey && metrics.tokenCapturedAt
       ? Date.now() - metrics.tokenCapturedAt
       : null;

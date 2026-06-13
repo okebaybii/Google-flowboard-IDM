@@ -286,7 +286,16 @@ def _client_context(project_id: str, paygate_tier: str) -> dict:
     upstream code path forgot to pass tier. Now we raise loudly on
     invalid / unknown values so a code regression can't quietly serve
     Pro to an Ultra account.
+
+    Free (unpaid) accounts report `PAYGATE_TIER_NOT_PAID`. There is no
+    Free-specific model family, so we map it to the Pro (TIER_ONE) request
+    shape and let Google Flow itself decide whether the account is allowed
+    to run the generation — rather than refusing at our boundary. This is
+    the deliberate "let Free users try" policy, NOT a silent downgrade of a
+    paid tier (the only value remapped is NOT_PAID).
     """
+    if paygate_tier == "PAYGATE_TIER_NOT_PAID":
+        paygate_tier = "PAYGATE_TIER_ONE"
     if paygate_tier not in _VALID_TIERS:
         raise ValueError(
             f"invalid paygate_tier {paygate_tier!r} — must be one of {sorted(_VALID_TIERS)}"

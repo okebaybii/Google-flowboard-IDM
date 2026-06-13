@@ -176,6 +176,23 @@ class FlowClient:
             logger.warning("fetch_paygate_tier: response was not JSON")
             return False
         tier = data.get("userPaygateTier")
+        if tier == "PAYGATE_TIER_NOT_PAID":
+            # Free (unpaid) Google Flow account. Flow returns this verbatim
+            # for accounts without a Pro/Ultra subscription. Recognise it as
+            # a first-class Free tier instead of leaving tier unresolved (the
+            # old behaviour surfaced a confusing "Tier unknown" banner). The
+            # dispatch path maps Free → TIER_ONE model keys (see
+            # `_resolve_paygate_tier` / `resolve_video_model`); Google Flow
+            # itself enforces whether the account may actually run Veo.
+            self._paygate_tier = "PAYGATE_TIER_NOT_PAID"
+            self._sku = "WS_FREE"
+            credits_val = data.get("credits")
+            self._credits = credits_val if isinstance(credits_val, int) else 0
+            logger.info(
+                "fetch_paygate_tier resolved FREE tier (NOT_PAID) credits=%s",
+                self._credits,
+            )
+            return True
         if tier not in ("PAYGATE_TIER_ONE", "PAYGATE_TIER_TWO"):
             # Unknown / missing tier value (e.g. a future PAYGATE_TIER_THREE or
             # a Flow API contract change). Do NOT guess — leave the cache

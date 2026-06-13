@@ -388,7 +388,13 @@ export interface AuthMe {
   // triggered when the extension pushes a Bearer token. Falls back to
   // the legacy passive sniff (extension reading userPaygateTier out of
   // outgoing Flow request bodies) if the agent fetch fails.
-  paygate_tier: "PAYGATE_TIER_ONE" | "PAYGATE_TIER_TWO" | null;
+  // NOT_PAID = Free (unpaid) account; recognised so the UI shows "Free"
+  // instead of a "Tier unknown" banner. Dispatch maps Free → Pro keys.
+  paygate_tier:
+    | "PAYGATE_TIER_ONE"
+    | "PAYGATE_TIER_TWO"
+    | "PAYGATE_TIER_NOT_PAID"
+    | null;
   // Subscription SKU from /v1/credits — e.g. "WS_ULTRA" / "WS_PRO".
   // Available alongside paygate_tier; null until the credits fetch lands.
   sku: string | null;

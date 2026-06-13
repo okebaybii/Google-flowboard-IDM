@@ -52,7 +52,11 @@ interface GenerationState {
   // Auto-detected from Flow's createProject response — used as the
   // default tier for every dispatch so the UI no longer needs to ask.
   // Null until the first successful project bootstrap.
-  paygateTier: "PAYGATE_TIER_ONE" | "PAYGATE_TIER_TWO" | null;
+  paygateTier:
+    | "PAYGATE_TIER_ONE"
+    | "PAYGATE_TIER_TWO"
+    | "PAYGATE_TIER_NOT_PAID"
+    | null;
   error: string | null;
 
   openGenerationDialog(rfId: string, prompt: string): void;

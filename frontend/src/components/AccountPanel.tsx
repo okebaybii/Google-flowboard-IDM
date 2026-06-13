@@ -165,13 +165,17 @@ export function AccountPanel({ collapsed = false }: { collapsed?: boolean }) {
       ? new Intl.NumberFormat("en-US").format(credits)
       : null;
 
-  // Google Flow plan tiers — both are paid (Flowboard's hard
-  // requirement). TIER_TWO = Ultra (higher tier), TIER_ONE = Pro.
+  // Google Flow plan tiers. TIER_TWO = Ultra, TIER_ONE = Pro, NOT_PAID =
+  // Free (unpaid account). Free is recognised so the UI shows the real
+  // plan instead of a "Tier unknown" banner; dispatch maps Free → Pro
+  // model keys and lets Google Flow enforce actual entitlement.
   const tierLabel = tier === "PAYGATE_TIER_TWO"
     ? "Ultra"
     : tier === "PAYGATE_TIER_ONE"
       ? "Pro"
-      : "—";
+      : tier === "PAYGATE_TIER_NOT_PAID"
+        ? "Free"
+        : "—";
 
   return (
     <>

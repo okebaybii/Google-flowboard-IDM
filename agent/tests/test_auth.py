@@ -251,6 +251,38 @@ async def test_fetch_paygate_tier_rejects_unknown_tier_value(monkeypatch):
     assert flow_client.paygate_tier is None
 
 
+@pytest.mark.asyncio
+async def test_fetch_paygate_tier_recognises_free_not_paid(monkeypatch):
+    """A free (unpaid) Flow account reports `PAYGATE_TIER_NOT_PAID`.
+    We recognise it as a first-class Free tier (sku WS_FREE) instead of
+    leaving it unresolved — otherwise the AccountPanel shows a confusing
+    "Tier unknown" banner for a perfectly-detected free account."""
+    import httpx
+    flow_client._flow_key = "ya29.fake"
+    flow_client._paygate_tier = None
+    flow_client._sku = None
+    flow_client._credits = None
+
+    class _MockResponse:
+        status_code = 200
+        def json(self):
+            return {"userPaygateTier": "PAYGATE_TIER_NOT_PAID", "credits": 0}
+
+    class _MockClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def get(self, *args, **kwargs):
+            return _MockResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
+    ok = await flow_client.fetch_paygate_tier()
+    assert ok is True
+    assert flow_client.paygate_tier == "PAYGATE_TIER_NOT_PAID"
+    assert flow_client.sku == "WS_FREE"
+    assert flow_client.credits == 0
+
+
 def test_logout_clears_cached_identity_and_tier(client):
     """POST /api/auth/logout drops the cached profile + tier so the
     next /me reflects the logged-out state immediately. extension_notified
