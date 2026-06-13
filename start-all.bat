@@ -36,7 +36,7 @@ del run_hidden.vbs
 
 echo Vui long doi 5 giay de he thong khoi dong...(Waiting 5 seconds for startup...)
 timeout /t 5 /nobreak >nul
-start http://127.0.0.1:1234
+start http://localhost:1234
 echo Flowboard dang chay ngam! (Flowboard running in background!)
 echo Luu y: De tat, ban can vao Task Manager de tat 'python.exe' va 'node.exe'
 pause
@@ -53,7 +53,7 @@ start "Flowboard Frontend" cmd /k "npm run dev"
 
 echo Vui long doi 5 giay de he thong khoi dong...(Waiting 5 seconds for startup...)
 timeout /t 5 /nobreak >nul
-start http://127.0.0.1:1234
+start http://localhost:1234
 echo Flowboard da duoc khoi dong! (Flowboard started!)
 pause
 exit
