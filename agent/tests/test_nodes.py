@@ -390,45 +390,53 @@ def test_story_script_sample_video_creates_reference_asset(client, monkeypatch):
     assert sample_ref["data"]["mediaId"] == media_id
     assert sample_ref["data"]["aspectRatio"] == "IMAGE_ASPECT_RATIO_LANDSCAPE"
 
-    image_nodes = [n for n in detail["nodes"] if n["type"] == "image"]
+    # With a sample video, each scene now anchors to the real source frame at
+    # that point in the timeline: one "done" image node per scene carrying the
+    # uploaded frame, and that scene's clip starts from it (so the clip
+    # reproduces the original's composition shot-by-shot). 2 scenes → 2 source
+    # image nodes + 2 video nodes.
+    image_nodes = sorted(
+        [n for n in detail["nodes"] if n["type"] == "image"],
+        key=lambda n: n["x"],
+    )
     video_nodes = sorted(
         [n for n in detail["nodes"] if n["type"] == "video"],
         key=lambda n: n["x"],
     )
-    assert len(image_nodes) == 1
+    assert len(image_nodes) == 2
     assert len(video_nodes) == 2
+
+    # Source-frame image nodes are pre-rendered (status done) and carry the
+    # uploaded source frame media id — no Imagen call is needed for them.
+    for img in image_nodes:
+        assert img["status"] == "done"
+        assert img["data"]["mediaId"] == media_id
+        assert img["data"].get("sourceVideoFrame") is True
 
     first_video_data = video_nodes[0]["data"]
     second_video_data = video_nodes[1]["data"]
     assert first_video_data["sequenceIndex"] == 0
     assert first_video_data["sequenceTotal"] == 2
-    assert first_video_data["continuityMode"] == "chain"
-    assert "Continuous video sequence clip 1 of 2" in first_video_data["prompt"]
-    assert "Action beat for this clip: performing the same dance move" in first_video_data["prompt"]
     assert second_video_data["sequenceIndex"] == 1
     assert second_video_data["sequenceTotal"] == 2
-    assert second_video_data["requiresPreviousClip"] is True
-    assert second_video_data["fallbackStartImage"] is True
-    assert "Continuous video sequence clip 2 of 2" in second_video_data["prompt"]
-    assert "final frame of clip 1" in second_video_data["prompt"]
+    assert "Action beat for this clip: performing the same dance move" in first_video_data["prompt"]
     assert "continues the choreography" in second_video_data["prompt"]
 
     edges = detail["edges"]
-    assert any(
-        e["source_id"] == sample_ref["id"] and e["target_id"] == image_nodes[0]["id"]
-        for e in edges
-    )
+    # Every clip keeps the sample-video identity reference attached.
     assert all(
         any(e["source_id"] == sample_ref["id"] and e["target_id"] == v["id"] for e in edges)
         for v in video_nodes
     )
-    assert any(
-        e["source_id"] == image_nodes[0]["id"]
-        and e["target_id"] == video_nodes[1]["id"]
-        and e["target_handle"] == "fallback-start-image"
-        for e in edges
-    )
-    assert "Do not invent a different character" in image_nodes[0]["data"]["prompt"]
+    # Each clip's PRIMARY start frame is its own scene's source-frame image
+    # node (a non-fallback edge), so it reproduces that shot.
+    for img, vid in zip(image_nodes, video_nodes):
+        assert any(
+            e["source_id"] == img["id"]
+            and e["target_id"] == vid["id"]
+            and e.get("target_handle") != "fallback-start-image"
+            for e in edges
+        )
 
 
 def test_story_script_character_reference_locks_identity_without_sample_video(client, monkeypatch):

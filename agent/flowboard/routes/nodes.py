@@ -462,19 +462,30 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             duration = total_frames / fps if fps > 0 else 0
 
-            # Target ~8 frames total regardless of length to stay under MAX_ATTACHMENTS=10
+            # Extract a denser, evenly-spaced set of frames across the whole
+            # timeline. We keep ~12 candidates: the first 8 are still sent to
+            # Gemini for motion analysis (MAX_ATTACHMENTS budget), but the full
+            # ordered list is later mapped onto the returned scenes so each
+            # scene's clip can start from the REAL frame at that point in the
+            # source video (timeline-aligned), not just a single hero frame.
+            # `frac` (0..1) records each frame's position in the video so we can
+            # pick the frame nearest a given scene's normalized timestamp.
+            MAX_CANDIDATE_FRAMES = 12
             if total_frames > 0:
-                step = max(1, total_frames // 8)
+                step = max(1, total_frames // MAX_CANDIDATE_FRAMES)
                 frame_count = 0
                 saved_count = 0
-                while cap.isOpened() and saved_count < 8:
+                while cap.isOpened() and saved_count < MAX_CANDIDATE_FRAMES:
                     ret, frame = cap.read()
                     if not ret:
                         break
                     if frame_count % step == 0:
                         frame_path = os.path.join(temp_dir, f"frame_{saved_count}.jpg")
                         cv2.imwrite(frame_path, frame)
-                        attachments.append(frame_path)
+                        # Only the first 8 frames go to Gemini (attachment cap);
+                        # the rest still serve as timeline anchors for scenes.
+                        if len(attachments) < 8:
+                            attachments.append(frame_path)
                         shape = getattr(frame, "shape", None)
                         height = int(shape[0]) if shape is not None and len(shape) >= 2 else 0
                         width = int(shape[1]) if shape is not None and len(shape) >= 2 else 0
@@ -484,6 +495,7 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                                 "width": width,
                                 "height": height,
                                 "face_score": _frame_face_score(cv2, frame),
+                                "frac": (frame_count / total_frames) if total_frames else 0.0,
                             }
                         )
                         saved_count += 1
@@ -524,7 +536,14 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
         raise HTTPException(400, f"Lỗi từ AI (Gemini): {str(exc)}")
 
     sample_reference = None
+    # Per-scene timeline-aligned frames: scene_frame_refs[i] holds the uploaded
+    # source frame nearest scene i's position in the video (or None). When
+    # present, each scene's clip starts from the REAL source frame so the
+    # result tracks the original's composition/progression, and the
+    # auto face-swap (if a Character is connected) replaces the face.
+    scene_frame_refs: list[Optional[dict]] = []
     if sample_frame_candidates:
+        # Hero frame (best visible face) — kept as a global identity/style ref.
         scored = [f for f in sample_frame_candidates if f.get("face_score", 0) > 0]
         if scored:
             chosen_frame = max(scored, key=lambda f: f.get("face_score", 0))
@@ -537,6 +556,29 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
             width=chosen_frame["width"],
             height=chosen_frame["height"],
         )
+
+        # Map one source frame to each scene by normalized timeline position.
+        # Scene i sits at (i + 0.5) / N of the way through the video; pick the
+        # extracted frame whose `frac` is closest. Upload each once; reuse the
+        # hero upload when a scene maps to the same frame to save round-trips.
+        n_scenes = max(len(scenes), 1)
+        uploaded_by_path: dict[str, Optional[dict]] = {}
+        if sample_reference is not None:
+            uploaded_by_path[chosen_frame["path"]] = sample_reference
+        ordered = sorted(sample_frame_candidates, key=lambda f: f.get("frac", 0.0))
+        for i in range(len(scenes)):
+            target = (i + 0.5) / n_scenes
+            nearest = min(ordered, key=lambda f: abs(f.get("frac", 0.0) - target))
+            path = nearest["path"]
+            if path not in uploaded_by_path:
+                uploaded_by_path[path] = await _upload_sample_reference_frame(
+                    nearest["path"],
+                    project_id=body.projectId,
+                    story_node_id=node_id,
+                    width=nearest["width"],
+                    height=nearest["height"],
+                )
+            scene_frame_refs.append(uploaded_by_path[path])
 
     if temp_dir:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -704,13 +746,65 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                     "a different character. "
                 )
 
+            # When the user supplied a sample video, we anchor EACH scene to the
+            # real source frame at that point in the timeline (scene_frame_refs).
+            # Every scene then spawns its own "done" image node holding that
+            # frame, and the scene's clip starts from it — so the generated video
+            # tracks the original's composition/progression shot-by-shot, and the
+            # auto face-swap (Character connected) puts your character's face on
+            # top. Without a sample video we keep the classic behaviour: only the
+            # first scene gets an AI-generated base image and clips chain off the
+            # previous clip's last frame.
+            use_source_frames = bool(scene_frame_refs)
+
             prev_vid_node = None
+            base_img_node = None
             for i, scene in enumerate(scenes):
                 image_prompt = _scene_text(scene, "image_prompt")
                 video_prompt = _scene_text(scene, "video_prompt")
 
-                # Only spawn the base image for the very first scene
-                if i == 0:
+                scene_frame = scene_frame_refs[i] if i < len(scene_frame_refs) else None
+
+                if use_source_frames and scene_frame:
+                    # Per-scene image node carrying the REAL source frame, already
+                    # "done" (no Imagen call) so the batch reuses it as-is.
+                    src_short_id = generate_unique_short_id(s, board_id)
+                    src_img_node = Node(
+                        board_id=board_id,
+                        short_id=src_short_id,
+                        type="image",
+                        x=base_x + (i + 1) * 320,
+                        y=base_y - 100,
+                        data={
+                            "title": scene.get("title", f"Cảnh {i+1} - Frame gốc"),
+                            "prompt": image_prompt,
+                            "mediaId": scene_frame["media_id"],
+                            "mediaIds": [scene_frame["media_id"]],
+                            "variantCount": 1,
+                            "aspectRatio": scene_frame.get("aspect_ratio")
+                                or "IMAGE_ASPECT_RATIO_PORTRAIT",
+                            "sourceVideoFrame": True,
+                        },
+                        status="done",
+                    )
+                    s.add(src_img_node)
+                    s.flush()
+                    for ref_id in upstream_refs:
+                        s.add(Edge(board_id=board_id, source_id=ref_id,
+                                   target_id=src_img_node.id, kind="ref"))
+                    spawned_nodes.append(src_img_node)
+                    scene_start_node = src_img_node
+                    if base_img_node is None:
+                        base_img_node = src_img_node
+                    # Link the uploaded frame asset to its node for cleanup/UX.
+                    asset = s.exec(
+                        select(Asset).where(Asset.uuid_media_id == scene_frame["media_id"])
+                    ).first()
+                    if asset and asset.node_id is None:
+                        asset.node_id = src_img_node.id
+                        s.add(asset)
+                elif i == 0:
+                    # Classic path: AI-generated base image for the first scene.
                     first_image_prompt = image_prompt
                     if identity_prefix and identity_prefix not in first_image_prompt:
                         first_image_prompt = f"{identity_prefix}{first_image_prompt}"
@@ -747,6 +841,9 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
 
                     spawned_nodes.append(img_node)
                     base_img_node = img_node
+                    scene_start_node = img_node
+                else:
+                    scene_start_node = None
 
                 combined_prompt = _build_continuity_video_prompt(
                     scene_index=i,
@@ -786,21 +883,33 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                 s.add(vid_node)
                 s.flush()
 
-                # Chaining logic: first video connects to base_img_node, subsequent videos connect to the previous video
-                source_id_for_video = prev_vid_node.id if prev_vid_node else base_img_node.id
+                # Start-frame wiring.
+                #  - Source-frame mode: each clip starts from ITS OWN scene's
+                #    real source frame so it reproduces that shot's composition.
+                #    The previous clip's last frame is added as a fallback start
+                #    image (used only if this scene's frame is unavailable),
+                #    keeping a continuity bridge without overriding the anchor.
+                #  - Classic mode: clip 1 starts from the base image, each later
+                #    clip chains off the previous clip's last frame.
+                if use_source_frames and scene_start_node is not None:
+                    primary_source_id = scene_start_node.id
+                    fallback_source_id = prev_vid_node.id if prev_vid_node else None
+                else:
+                    primary_source_id = prev_vid_node.id if prev_vid_node else base_img_node.id
+                    fallback_source_id = base_img_node.id if prev_vid_node is not None else None
 
                 edge1 = Edge(
                     board_id=board_id,
-                    source_id=source_id_for_video,
+                    source_id=primary_source_id,
                     target_id=vid_node.id,
                     kind="ref"
                 )
                 s.add(edge1)
 
-                if prev_vid_node is not None:
+                if fallback_source_id is not None and fallback_source_id != primary_source_id:
                     fallback_edge = Edge(
                         board_id=board_id,
-                        source_id=base_img_node.id,
+                        source_id=fallback_source_id,
                         target_id=vid_node.id,
                         kind="ref",
                         target_handle="fallback-start-image",
