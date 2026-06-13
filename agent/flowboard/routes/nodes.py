@@ -724,7 +724,11 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                         data={
                             "title": scene.get("title", f"Cảnh {i+1} - Ảnh"),
                             "prompt": first_image_prompt,
-                            "aspectRatio": "IMAGE_ASPECT_RATIO_LANDSCAPE"
+                            # Portrait by default to match the Video Assembly
+                            # batch default (9:16 TikTok/Reels). Mismatched
+                            # defaults made the batch flag every story image as
+                            # aspect_mismatch and regenerate it needlessly.
+                            "aspectRatio": "IMAGE_ASPECT_RATIO_PORTRAIT"
                         },
                         status="idle"
                     )
@@ -765,7 +769,10 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                         "title": scene.get("title", f"Cảnh {i+1} - Clip"),
                         "prompt": combined_prompt,
                         "narration": scene.get("narration", ""),
-                        "aspectRatio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+                        # Portrait default to match the Video Assembly batch
+                        # default (9:16) — avoids spurious aspect_mismatch
+                        # regeneration when the chain is built by Generate All.
+                        "aspectRatio": "VIDEO_ASPECT_RATIO_PORTRAIT",
                         "sourceImagePrompt": image_prompt,
                         "sourceVideoPrompt": video_prompt,
                         "sequenceIndex": i,

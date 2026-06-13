@@ -1217,9 +1217,25 @@ class WorkerController:
                         s.add(node)
                 s.commit()
                 
-                # Automatic downstream triggering: after successful image generation,
-                # find downstream Video nodes and auto-trigger their generation.
-                if not err and node_id is not None and req_type in ("gen_image", "edit_image"):
+                # Automatic downstream triggering: after a successful image OR
+                # video render, find downstream Video nodes and auto-trigger
+                # their generation. Including `gen_video` lets a story chain
+                # cascade (clip 1 → clip 2 → …) when clips are generated
+                # individually — `_trigger_downstream_videos` uses this clip's
+                # media as the next clip's start frame (its last frame is
+                # extracted at dispatch) and already skips `fallback-start-image`
+                # edges so only the real next clip fires.
+                #
+                # Skipped entirely for batch-created requests (`__from_batch`):
+                # the batch's `run_batch_generation` drives the chain itself in
+                # topological order, so auto-triggering here would double-enqueue
+                # the next clip.
+                if (
+                    not err
+                    and node_id is not None
+                    and req_type in ("gen_image", "edit_image", "gen_video", "gen_video_omni")
+                    and not params.get("__from_batch")
+                ):
                     res = result if isinstance(result, dict) else {}
                     media_ids = res.get("media_ids") or []
                     primary_media_id = next((m for m in media_ids if m), None)

@@ -1222,15 +1222,36 @@ async def run_batch_generation(
                             }
                             req_type = "gen_video_omni"
                         else:
+                            # Primary start frames come from the MAIN upstream
+                            # edges (the previous clip in a chain, or the base
+                            # image). `fallback-start-image` edges are NOT real
+                            # start frames — they only supply a backup start
+                            # image to use when the primary parent (e.g. the
+                            # previous clip) failed to render. Counting them as
+                            # start media made every chained clip receive the
+                            # opening image as an END keyframe (via the 2-media
+                            # start+end rule below), which pulled each clip back
+                            # to the opening pose and broke forward continuity.
                             start_media_ids = []
                             seen_start_ids = set()
+                            fallback_start_ids: list[str] = []
                             for edge in parent_edges:
                                 p_node = session.get(Node, edge.source_id)
-                                if p_node and p_node.type in ("image", "Storyboard", "video"):
-                                    mid = _select_node_media_id(p_node, edge)
-                                    if mid and mid not in seen_start_ids:
-                                        start_media_ids.append(mid)
-                                        seen_start_ids.add(mid)
+                                if not (p_node and p_node.type in ("image", "Storyboard", "video")):
+                                    continue
+                                mid = _select_node_media_id(p_node, edge)
+                                if not mid or mid in seen_start_ids:
+                                    continue
+                                if edge.target_handle == "fallback-start-image":
+                                    fallback_start_ids.append(mid)
+                                    continue
+                                start_media_ids.append(mid)
+                                seen_start_ids.add(mid)
+                            # Primary parent produced nothing (e.g. the previous
+                            # clip failed) — fall back to the backup start image
+                            # so this clip can still render from a known frame.
+                            if not start_media_ids and fallback_start_ids:
+                                start_media_ids = fallback_start_ids[:1]
                             if not start_media_ids:
                                 failed_nodes.add(nid)
                                 node.status = "error"
@@ -1269,6 +1290,14 @@ async def run_batch_generation(
                             else:
                                 params["start_media_id"] = start_media_ids[0]
                             req_type = "gen_video"
+
+                # Mark every batch-created request so the worker's completion
+                # hook does NOT auto-trigger downstream clips for it: the batch
+                # drives the chain itself in topological order. Without this,
+                # an image/video finishing mid-batch would auto-enqueue its
+                # downstream clip AND the batch loop would enqueue it again →
+                # duplicate generation.
+                params["__from_batch"] = True
 
                 # Retry generously on transient failures, but BOUNDED — a
                 # permanently-failing node (e.g. repeated CAPTCHA_FAILED) must
