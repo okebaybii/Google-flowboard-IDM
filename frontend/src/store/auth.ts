@@ -41,6 +41,9 @@ interface AuthState {
   loading: boolean;
   sessionConflict: boolean;
   error: string | null;
+  // True when the backend runs with FLOWBOARD_NO_AUTH (personal/local
+  // build). The login screen + session heartbeat are skipped entirely.
+  noAuth: boolean;
   
   init: () => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
@@ -102,9 +105,41 @@ export const useAuthStore = create<AuthState>((set, get) => {
     loading: true,
     sessionConflict: false,
     error: null,
+    noAuth: false,
 
     init: async () => {
       set({ loading: true });
+
+      // Personal / local build: ask the backend whether login is disabled.
+      // When FLOWBOARD_NO_AUTH is on, auto-sign-in as the fixed local user
+      // and go straight to the canvas — no Google / Firebase login screen.
+      try {
+        const modeRes = await fetch("/api/auth/mode");
+        if (modeRes.ok) {
+          const mode = await modeRes.json();
+          if (mode?.no_auth) {
+            const uid = mode.local_uid || "local";
+            set({
+              user: {
+                uid,
+                email: "local@flowboard.app",
+                name: "Local",
+                is_admin: true,
+                is_approved: true,
+              },
+              token: `mock_${uid}`,
+              noAuth: true,
+              sessionConflict: false,
+              loading: false,
+            });
+            return;
+          }
+        }
+      } catch {
+        // Backend not reachable yet / older build — fall through to the
+        // normal Firebase / mock login flow below.
+      }
+
       if (hasRealFirebase && firebaseAuth) {
         onAuthStateChanged(firebaseAuth, async (fbUser) => {
           if (fbUser) {

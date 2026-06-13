@@ -31,6 +31,7 @@ export function App() {
   const logout = useAuthStore((s) => s.logout);
   const token = useAuthStore((s) => s.token);
   const sessionId = useAuthStore((s) => s.sessionId);
+  const noAuth = useAuthStore((s) => s.noAuth);
 
   useEffect(() => {
     initAuth();
@@ -38,6 +39,8 @@ export function App() {
 
   // Heartbeat polling to detect session conflict
   useEffect(() => {
+    // Personal/local build (no-auth): there is no remote session to police.
+    if (noAuth) return;
     if (!authUser || !token || sessionConflict) return;
 
     const interval = setInterval(async () => {
@@ -60,7 +63,7 @@ export function App() {
     }, 10000); // 10 seconds
 
     return () => clearInterval(interval);
-  }, [authUser, token, sessionConflict, sessionId]);
+  }, [authUser, token, sessionConflict, sessionId, noAuth]);
 
   useEffect(() => {
     if (!authUser) return; // Only load board after authenticated

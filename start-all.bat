@@ -1,5 +1,9 @@
 @echo off
 setlocal
+REM Personal/local use: disable login (go straight into the UI).
+REM Child processes started below inherit this environment variable.
+REM Set to 0 to restore the Google/Firebase login screen.
+set FLOWBOARD_NO_AUTH=1
 echo =======================================
 echo Flowboard Startup Script
 echo =======================================

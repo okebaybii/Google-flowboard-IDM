@@ -4293,6 +4293,7 @@ button:disabled {
 }
 .provider-card__status--ok { color: #88e0a8; }
 .provider-card__status--warn { color: #ffc266; }
+.provider-card__status--err { color: #f87171; }
 .provider-card__current-badge {
   margin-left: auto;
   padding: 1px 7px;

@@ -23,6 +23,57 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
+# Fixed identity used when authentication is disabled (personal / local
+# single-user build). All per-user state (secrets, boards) is scoped to
+# this uid so the app behaves like a normal logged-in single user.
+NO_AUTH_UID = "local"
+
+
+def no_auth_enabled() -> bool:
+    """True when login is disabled for personal/local use.
+
+    Controlled by the `FLOWBOARD_NO_AUTH` env var (set to "1" by the
+    packaged .exe and the local start scripts). When on, the global auth
+    dependency short-circuits and the frontend auto-signs-in as a fixed
+    local user — no Google / Firebase login screen. Default OFF so the
+    hosted multi-user deployment keeps its login + session control.
+    """
+    return os.getenv("FLOWBOARD_NO_AUTH", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+_local_account_ready = False
+
+
+def ensure_local_account() -> None:
+    """Create the fixed local UserAccount row once, in no-auth mode.
+
+    Per-user state (LLM API keys / provider config) is stored on the
+    UserAccount row keyed by uid (see services/llm/secrets.py). In no-auth
+    mode the uid is always NO_AUTH_UID, but the normal `register-session`
+    flow that would create the row is skipped — so without this, every
+    `secrets.write()` silently no-ops (no row to write to) and saved API
+    keys vanish. Idempotent + cached so it costs one query at most.
+    """
+    global _local_account_ready
+    if _local_account_ready:
+        return
+    try:
+        with get_auth_session() as session:
+            acc = session.get(UserAccount, NO_AUTH_UID)
+            if acc is None:
+                acc = UserAccount(
+                    firebase_uid=NO_AUTH_UID,
+                    email="local@flowboard.app",
+                    is_approved=True,
+                    is_admin=True,
+                )
+                session.add(acc)
+                session.commit()
+                logger.info("no-auth: created fixed local UserAccount %r", NO_AUTH_UID)
+        _local_account_ready = True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("no-auth: failed to ensure local UserAccount: %s", exc)
+
 
 def verify_firebase_token(id_token: str) -> dict:
     """Verify Firebase ID token, supporting mock tokens for local development fallback."""
@@ -69,6 +120,14 @@ def verify_firebase_token(id_token: str) -> dict:
         
         logger.error(f"Failed to verify Firebase token: {err_msg}")
         raise HTTPException(status_code=401, detail=f"invalid_token: {err_msg}")
+
+
+@router.get("/mode")
+def auth_mode() -> dict:
+    """Public endpoint (no auth required) telling the frontend whether
+    login is disabled. When `no_auth` is true the SPA skips the login
+    screen and auto-signs-in as the fixed local user."""
+    return {"no_auth": no_auth_enabled(), "local_uid": NO_AUTH_UID}
 
 
 class RegisterSessionRequest(BaseModel):
@@ -278,11 +337,20 @@ async def check_active_session_globally(
     """Global dependency to check active session ID and admin approval for all API endpoints."""
     if os.getenv("TESTING") == "true":
         return
-        
+
+    # Personal / local build: authentication is disabled. Bind every request
+    # to a single fixed local user and skip all session/approval checks.
+    if no_auth_enabled():
+        from flowboard.services.llm.secrets import current_user_uid_var
+        ensure_local_account()
+        current_user_uid_var.set(NO_AUTH_UID)
+        return
+
     path = request.url.path
     # Skip non-API endpoints, health checks, and session registration
     if not path.startswith("/api") or path in (
         "/api/health",
+        "/api/auth/mode",
         "/api/auth/register-session",
         "/api/auth/extension/download",
         "/api/ext/callback",

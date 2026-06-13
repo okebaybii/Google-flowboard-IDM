@@ -27,6 +27,10 @@ def open_browser():
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     logging.basicConfig(level=logging.INFO)
+
+    # Packaged personal build: default to no-login (straight into the UI).
+    # A user who exports FLOWBOARD_NO_AUTH=0 before launching keeps login.
+    os.environ.setdefault("FLOWBOARD_NO_AUTH", "1")
     
     # Start the browser thread
     threading.Thread(target=open_browser, daemon=True).start()

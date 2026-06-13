@@ -21,6 +21,11 @@ interface ProviderCardProps {
   selected: boolean;
   /** True when this card matches the currently-applied config (badge). */
   current: boolean;
+  /** Live connection-test state for THIS card, when it's the selected one.
+   * Undefined for non-selected cards. Drives the honest "Connected" badge:
+   * a saved key only means "key present", NOT "key works" — so we never
+   * claim Connected until an actual test ping succeeds. */
+  testState?: "untested" | "testing" | "ok" | "fail";
   /** Click handler — flips selection. Always fires; the section above
    * decides whether to render setup guidance vs. test flow. */
   onSelect(name: LLMProviderName): void;
@@ -35,26 +40,38 @@ const PROVIDER_META: Record<
   openai: { name: "OpenAI API", tagline: "ChatGPT API" },
 };
 
-function statusLabel(p: LLMProviderInfo): string {
-  if (p.available && p.configured) return "Connected";
+function statusLabel(p: LLMProviderInfo, testState?: ProviderCardProps["testState"]): string {
+  // A successful test ping is the ONLY thing that proves the key works.
+  if (testState === "ok") return "Connected";
+  if (testState === "testing") return "Testing…";
+  if (testState === "fail") return "Invalid key";
   if (p.lastError === "not_authenticated") return "Not signed in";
   if (p.requiresKey && !p.configured) return "API key needed";
+  // Key is present but unverified — DON'T claim "Connected". The backend's
+  // `configured`/`available` only mean "a key exists", not "the key works".
+  if (p.configured) return "Key saved · test it";
   return "Setup needed";
 }
 
-function statusKind(p: LLMProviderInfo): "ok" | "warn" {
-  return p.available && p.configured ? "ok" : "warn";
+function statusKind(
+  testState?: ProviderCardProps["testState"],
+): "ok" | "warn" | "err" {
+  if (testState === "ok") return "ok";
+  if (testState === "fail") return "err";
+  // Saved-but-unverified and all setup states are "warn" (amber), never the
+  // confident green — green is reserved for a passing test.
+  return "warn";
 }
 
-export function ProviderCard({ provider, selected, current, onSelect }: ProviderCardProps) {
+export function ProviderCard({ provider, selected, current, testState, onSelect }: ProviderCardProps) {
   const meta = PROVIDER_META[provider.name];
-  const kind = statusKind(provider);
+  const kind = statusKind(testState);
 
   return (
     <button
       type="button"
       className={`provider-card${selected ? " provider-card--selected" : ""}${
-        kind === "warn" ? " provider-card--unconfigured" : ""
+        kind !== "ok" ? " provider-card--unconfigured" : ""
       }`}
       onClick={() => onSelect(provider.name)}
       aria-pressed={selected}
@@ -66,7 +83,7 @@ export function ProviderCard({ provider, selected, current, onSelect }: Provider
       <div className="provider-card__foot">
         <span className={`provider-card__status provider-card__status--${kind}`}>
           <span className="provider-card__status-dot" aria-hidden="true">●</span>
-          {statusLabel(provider)}
+          {statusLabel(provider, testState)}
         </span>
         {current && !selected && (
           <span className="provider-card__current-badge">Active</span>

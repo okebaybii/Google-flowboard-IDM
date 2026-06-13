@@ -315,6 +315,10 @@ export function AiProvidersSection() {
                 provider={p}
                 selected={pending === name}
                 current={current === name}
+                // Only the selected card reflects the live test — switching
+                // cards resets `test`, so non-selected cards pass undefined
+                // and fall back to the "Key saved · test it" honest label.
+                testState={pending === name ? test.state : undefined}
                 onSelect={handleSelect}
               />
             );

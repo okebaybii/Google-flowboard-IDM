@@ -378,8 +378,16 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
 
         board_id = node.board_id
         prompt_text = body.prompt or node.data.get("prompt", "")
-        if not prompt_text or not prompt_text.strip():
-            raise HTTPException(400, "Story prompt cannot be empty")
+        # A story can be driven by a text concept OR a reference video (whose
+        # keyframes are extracted below and analysed by the LLM). Require at
+        # least one — matching the frontend, which lets the user run with just
+        # a sample video URL. Rejecting empty-prompt-but-has-video here was the
+        # "Story prompt cannot be empty" bug for video-only runs.
+        sample_video_url = body.sampleVideoUrl or node.data.get("sampleVideoUrl", "")
+        has_prompt = bool(prompt_text and prompt_text.strip())
+        has_video = bool(sample_video_url and str(sample_video_url).strip())
+        if not has_prompt and not has_video:
+            raise HTTPException(400, "Vui lòng nhập nội dung kịch bản hoặc link video mẫu.")
 
         # Get LLM provider
         saved_providers = secrets.read_active_providers()
