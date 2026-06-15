@@ -385,16 +385,17 @@ def test_story_script_sample_video_creates_reference_asset(client, monkeypatch):
         if n["type"] == "visual_asset"
         and n["data"].get("sourceStoryScriptId") == story["id"]
     ]
-    assert len(sample_refs) == 1
-    sample_ref = sample_refs[0]
-    assert sample_ref["data"]["mediaId"] == media_id
-    assert sample_ref["data"]["aspectRatio"] == "IMAGE_ASPECT_RATIO_LANDSCAPE"
+    assert len(sample_refs) == 2
+    frame_refs = sorted(
+        sample_refs,
+        key=lambda n: n["data"]["sequenceIndex"],
+    )
+    assert len(frame_refs) == 2
+    assert all(ref["data"]["mediaId"] == media_id for ref in frame_refs)
+    assert all(ref["data"].get("sourceVideoFrame") is True for ref in frame_refs)
 
-    # With a sample video, each scene now anchors to the real source frame at
-    # that point in the timeline: one "done" image node per scene carrying the
-    # uploaded frame, and that scene's clip starts from it (so the clip
-    # reproduces the original's composition shot-by-shot). 2 scenes → 2 source
-    # image nodes + 2 video nodes.
+    # With a sample video, each scene gets a sample-frame visual asset feeding
+    # a new AI image node. Each generated image then anchors only its matching clip.
     image_nodes = sorted(
         [n for n in detail["nodes"] if n["type"] == "image"],
         key=lambda n: n["x"],
@@ -406,12 +407,10 @@ def test_story_script_sample_video_creates_reference_asset(client, monkeypatch):
     assert len(image_nodes) == 2
     assert len(video_nodes) == 2
 
-    # Source-frame image nodes are pre-rendered (status done) and carry the
-    # uploaded source frame media id — no Imagen call is needed for them.
-    for img in image_nodes:
-        assert img["status"] == "done"
-        assert img["data"]["mediaId"] == media_id
-        assert img["data"].get("sourceVideoFrame") is True
+    for idx, img in enumerate(image_nodes):
+        assert img["status"] == "idle"
+        assert img["data"]["sourceVideoFrameMediaId"] == media_id
+        assert img["data"]["sequenceIndex"] == idx
 
     first_video_data = video_nodes[0]["data"]
     second_video_data = video_nodes[1]["data"]
@@ -423,24 +422,17 @@ def test_story_script_sample_video_creates_reference_asset(client, monkeypatch):
     assert "continues the choreography" in second_video_data["prompt"]
 
     edges = detail["edges"]
-    # The first generated/source image anchors every clip; raw sample refs feed
-    # image nodes only, not video nodes directly.
-    assert all(
-        any(
-            e["source_id"] == image_nodes[0]["id"]
-            and e["target_id"] == v["id"]
-            for e in edges
-        )
-        for v in video_nodes
-    )
+    for frame_ref, img, vid in zip(frame_refs, image_nodes, video_nodes):
+        assert any(e["source_id"] == frame_ref["id"] and e["target_id"] == img["id"] for e in edges)
+        assert any(e["source_id"] == img["id"] and e["target_id"] == vid["id"] for e in edges)
     assert not any(
-        e["source_id"] == sample_ref["id"] and e["target_id"] in {v["id"] for v in video_nodes}
+        e["source_id"] in {f["id"] for f in frame_refs}
+        and e["target_id"] in {v["id"] for v in video_nodes}
         for e in edges
     )
     assert any(
-        e["source_id"] == image_nodes[0]["id"]
+        e["source_id"] == video_nodes[0]["id"]
         and e["target_id"] == video_nodes[1]["id"]
-        and e["target_handle"] == "fallback-start-image"
         for e in edges
     )
 

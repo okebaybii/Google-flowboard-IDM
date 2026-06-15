@@ -708,72 +708,10 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
             has_character_ref = any(_node_type(ref_id) == "character" for ref_id in upstream_refs)
 
             if sample_reference:
-                sample_short_id = generate_unique_short_id(s, board_id)
-                sample_ref_node = Node(
-                    board_id=board_id,
-                    short_id=sample_short_id,
-                    type="visual_asset",
-                    x=base_x + 320,
-                    y=base_y - 320,
-                    data={
-                        "title": "Sample video reference",
-                        "prompt": (
-                            "Reference frame from the sample video. Use this as the "
-                            "authoritative scene/background/composition reference: keep "
-                            "the same location, room/outdoor setting, props, lighting, "
-                            "camera angle, framing, outfit/body pose, and choreography. "
-                            "If a Character reference is connected, replace ONLY the "
-                            "face/identity/person with the Character reference; DO NOT "
-                            "use this sample frame's face, facial features, identity, "
-                            "age, or skin tone. Do not change the sample background into "
-                            "a new location."
-                            if has_character_ref
-                            else
-                            "Reference frame from the sample video. Preserve the same "
-                            "on-screen subject identity, face, hairstyle, outfit, body "
-                            "proportions, dance style, and visual setting."
-                        ),
-                        "aiBrief": (
-                            "Authoritative sample scene reference for background, "
-                            "composition, lighting, camera, outfit/body pose, and motion. "
-                            "Character reference wins ONLY for face and identity when connected."
-                            if has_character_ref
-                            else
-                            "Primary identity and style reference extracted from the "
-                            "sample video; use it to keep the generated subject consistent."
-                        ),
-                        "mediaId": sample_reference["media_id"],
-                        "mediaIds": [sample_reference["media_id"]],
-                        "variantCount": 1,
-                        "aspectRatio": sample_reference["aspect_ratio"],
-                        "sampleVideoUrl": sample_video_url,
-                        "sourceStoryScriptId": node_id,
-                    },
-                    status="done",
-                )
-                s.add(sample_ref_node)
-                s.flush()
-
-                # Character nodes are the authoritative identity source.
-                # Keep sample-video frames after characters so Flow sees them
-                # as motion/style references instead of replacing the face.
-                last_character_idx = max(
-                    (
-                        idx
-                        for idx, ref_id in enumerate(upstream_refs)
-                        if _node_type(ref_id) == "character"
-                    ),
-                    default=-1,
-                )
-                upstream_refs.insert(last_character_idx + 1, sample_ref_node.id)
-                spawned_nodes.append(sample_ref_node)
-
-                asset = s.exec(
-                    select(Asset).where(Asset.uuid_media_id == sample_reference["media_id"])
-                ).first()
-                if asset and asset.node_id is None:
-                    asset.node_id = sample_ref_node.id
-                    s.add(asset)
+                # Keep the uploaded hero sample reference only as story metadata.
+                # Do not spawn a global visual_asset node on the canvas; per-scene
+                # sample-frame refs below are the only sample refs used for images.
+                pass
 
             character_ref_ids = [
                 ref_id for ref_id in upstream_refs if _node_type(ref_id) == "character"
@@ -821,42 +759,74 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                 scene_frame = scene_frame_refs[i] if i < len(scene_frame_refs) else None
 
                 if use_source_frames and scene_frame:
-                    # Per-scene image node carrying the REAL source frame, already
-                    # "done" (no Imagen call) so the batch reuses it as-is.
-                    src_short_id = generate_unique_short_id(s, board_id)
-                    src_img_node = Node(
+                    # Per-scene sample frame reference. This is NOT the final image;
+                    # it feeds the generated scene image together with Character refs.
+                    frame_short_id = generate_unique_short_id(s, board_id)
+                    frame_ref_node = Node(
                         board_id=board_id,
-                        short_id=src_short_id,
+                        short_id=frame_short_id,
+                        type="visual_asset",
+                        x=base_x + (i + 1) * 320,
+                        y=base_y - 320,
+                        data={
+                            "title": scene.get("title", f"Scene {i+1} - Sample frame"),
+                            "prompt": (
+                                "Timeline sample frame reference. Preserve this frame's background, "
+                                "composition, camera angle, lighting, outfit/body pose, and scene style. "
+                                "Use Character refs only for face/identity."
+                            ),
+                            "aiBrief": "Per-scene sample frame used as background/pose/camera reference.",
+                            "mediaId": scene_frame["media_id"],
+                            "mediaIds": [scene_frame["media_id"]],
+                            "variantCount": 1,
+                            "aspectRatio": scene_frame.get("aspect_ratio") or "IMAGE_ASPECT_RATIO_PORTRAIT",
+                            "sourceVideoFrame": True,
+                            "sourceStoryScriptId": node_id,
+                            "sequenceIndex": i,
+                        },
+                        status="done",
+                    )
+                    s.add(frame_ref_node)
+                    s.flush()
+                    spawned_nodes.append(frame_ref_node)
+
+                    scene_image_prompt = image_prompt
+                    if identity_prefix and identity_prefix not in scene_image_prompt:
+                        scene_image_prompt = f"{identity_prefix}{scene_image_prompt}"
+                    img_short_id = generate_unique_short_id(s, board_id)
+                    img_node = Node(
+                        board_id=board_id,
+                        short_id=img_short_id,
                         type="image",
                         x=base_x + (i + 1) * 320,
                         y=base_y - 100,
                         data={
-                            "title": scene.get("title", f"Cáº£nh {i+1} - Frame gá»‘c"),
-                            "prompt": image_prompt,
-                            "mediaId": scene_frame["media_id"],
-                            "mediaIds": [scene_frame["media_id"]],
-                            "variantCount": 1,
-                            "aspectRatio": scene_frame.get("aspect_ratio")
-                                or "IMAGE_ASPECT_RATIO_PORTRAIT",
-                            "sourceVideoFrame": True,
+                            "title": scene.get("title", f"Scene {i+1} - Image"),
+                            "prompt": scene_image_prompt,
+                            "aspectRatio": scene_frame.get("aspect_ratio") or "IMAGE_ASPECT_RATIO_PORTRAIT",
+                            "sourceVideoFrameMediaId": scene_frame["media_id"],
+                            "sequenceIndex": i,
                         },
-                        status="done",
+                        status="idle",
                     )
-                    s.add(src_img_node)
+                    s.add(img_node)
                     s.flush()
+
                     for ref_id in upstream_refs:
                         s.add(Edge(board_id=board_id, source_id=ref_id,
-                                   target_id=src_img_node.id, kind="ref"))
-                    spawned_nodes.append(src_img_node)
-                    scene_start_node = src_img_node
+                                   target_id=img_node.id, kind="ref"))
+                    s.add(Edge(board_id=board_id, source_id=frame_ref_node.id,
+                               target_id=img_node.id, kind="ref"))
+                    spawned_nodes.append(img_node)
+                    scene_start_node = img_node
                     if base_img_node is None:
-                        base_img_node = src_img_node
-                    # Link the uploaded frame asset to its node for cleanup/UX.
+                        base_img_node = img_node
+
                     asset = s.exec(
                         select(Asset).where(Asset.uuid_media_id == scene_frame["media_id"])
                     ).first()
                     if asset and asset.node_id is None:
-                        asset.node_id = src_img_node.id
+                        asset.node_id = frame_ref_node.id
                         s.add(asset)
                 elif i == 0:
                     # Classic path: AI-generated base image for the first scene.
@@ -938,15 +908,16 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                 s.add(vid_node)
                 s.flush()
 
-                # Video generation must anchor on the first generated/source image,
-                # not raw sample/character refs. Upstream refs feed image nodes only;
-                # all videos use the first image plus their prompt/chain context.
+                # Each clip is anchored by its own generated scene image.
+                # Sample-frame refs feed that image; videos never consume raw sample refs directly.
+                video_start_node = scene_start_node or base_img_node
+                if video_start_node is None:
+                    raise HTTPException(400, "No generated image source available for video clip.")
                 base_image_edge = Edge(
                     board_id=board_id,
-                    source_id=base_img_node.id,
+                    source_id=video_start_node.id,
                     target_id=vid_node.id,
                     kind="ref",
-                    target_handle="start-image" if i == 0 else "fallback-start-image",
                 )
                 s.add(base_image_edge)
 
