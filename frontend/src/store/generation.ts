@@ -3,7 +3,7 @@ import { ensureBoardProject, createRequest, getRequest, patchNode } from "../api
 import { useBoardStore } from "./board";
 import { useSettingsStore } from "./settings";
 
-type PollEntry = { requestId: number; timerId: ReturnType<typeof setTimeout> | null };
+type PollEntry = { requestId: number; timerId: ReturnType<typeof setTimeout> | null; retryCount: number; opts: Parameters<GenerationState["dispatchGeneration"]>[1] };
 
 const STYLE_PROMPTS: Record<string, { prompt: string }> = {
   hollywood: {
@@ -523,21 +523,41 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
               return { active: next };
             });
           } else if (req.status === "failed" || req.status === "timeout") {
-            // 'timeout' is the dedicated terminal state for the
-            // 5-minute video-gen budget. We render it as a node error
-            // so the card visually flags the stuck run, but tag the
-            // message so the user can tell auto-timeout apart from a
-            // generation failure.
-            const errMsg =
-              req.status === "timeout"
-                ? `Timed out after 5 minutes (${req.error ?? "video_timeout"})`
-                : (req.error ?? "unknown");
-            useBoardStore.getState().updateNodeData(rfId, { status: "error", error: errMsg });
-            set((s) => {
-              const next = { ...s.active };
-              delete next[rfId];
-              return { active: next, error: errMsg };
-            });
+            const MAX_AUTO_RETRIES = 5;
+            const currentEntry = get().active[rfId];
+            const retryCount = currentEntry?.retryCount ?? 0;
+
+            if (retryCount < MAX_AUTO_RETRIES) {
+              // Auto-retry: update node to show queued again, wait 2s, re-dispatch.
+              const retryNum = retryCount + 1;
+              useBoardStore.getState().updateNodeData(rfId, {
+                status: "queued",
+                error: `Auto-retrying (${retryNum}/${MAX_AUTO_RETRIES})…`,
+              });
+              set((s) => ({
+                active: {
+                  ...s.active,
+                  [rfId]: { requestId, timerId: null, retryCount: retryNum, opts },
+                },
+              }));
+              setTimeout(() => {
+                // Check node wasn't deleted/cancelled while waiting.
+                if (get().active[rfId] === undefined) return;
+                void get().dispatchGeneration(rfId, opts);
+              }, 2000);
+            } else {
+              // Exhausted retries — surface the error for manual handling.
+              const errMsg =
+                req.status === "timeout"
+                  ? `Timed out after 5 minutes (${req.error ?? "video_timeout"})`
+                  : (req.error ?? "unknown");
+              useBoardStore.getState().updateNodeData(rfId, { status: "error", error: errMsg });
+              set((s) => {
+                const next = { ...s.active };
+                delete next[rfId];
+                return { active: next, error: errMsg };
+              });
+            }
           } else if (req.status === "canceled") {
             // User-initiated cancel from the activity bell. Don't
             // stamp the node as 'error' — clear the in-flight state
@@ -553,7 +573,7 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
             set((s) => ({
               active: {
                 ...s.active,
-                [rfId]: { requestId, timerId: null },
+                [rfId]: { requestId, timerId: null, retryCount: s.active[rfId]?.retryCount ?? 0, opts: s.active[rfId]?.opts ?? opts },
               },
             }));
             scheduleNextPoll();
@@ -577,7 +597,7 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
       set((s) => ({
         active: {
           ...s.active,
-          [rfId]: { requestId, timerId },
+          [rfId]: { requestId, timerId, retryCount: s.active[rfId]?.retryCount ?? 0, opts: s.active[rfId]?.opts ?? opts },
         },
       }));
     }
@@ -586,7 +606,7 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
     set((s) => ({
       active: {
         ...s.active,
-        [rfId]: { requestId, timerId: null },
+        [rfId]: { requestId, timerId: null, retryCount: s.active[rfId]?.retryCount ?? 0, opts },
       },
     }));
     scheduleNextPoll();
