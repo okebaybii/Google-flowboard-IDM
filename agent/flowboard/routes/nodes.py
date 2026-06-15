@@ -487,6 +487,7 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
         "2. image_prompt: A highly detailed, descriptive, visual image generation prompt describing the starting frame of the scene in English. Include subject, lighting, colors, background, and environment. ALSO describe the EXACT framing and pose seen in the frame: the shot size / camera distance (e.g. full-body, knees-up, medium), whether the legs and lower body are in frame, the body pose, stance, hand/arm position, body angle, and the facial expression. If the frame is a full-body or knees-up shot, the prompt MUST say full-body / knees-up and keep the legs and full outfit in frame — never describe it as a tight upper-body or face close-up, and never add a smile or change the pose unless the source frame shows it.\n"
         "3. video_prompt: A description of only the next motion beat, gesture transition, ending pose, and camera movement in English (e.g., 'she raises her right hand from shoulder height into a small wave, then lands in a stable front-facing pose'). Do not restart the scene, change identity, change location, or repeat the opening pose unless it is the first scene.\n"
         "4. narration: A Vietnamese voiceover narration text (max 2 sentences) that describes the storytelling or dialogue in this scene. Speak naturally in Vietnamese.\n\n"
+        "ATTRACTIVE / ALLURE STYLING — CONDITIONAL: When the main subject is a WOMAN and the scene is a casual / fashion / lifestyle / dance / beauty / social-media context, write each `image_prompt` so the figure looks striking, attractive and gợi cảm (sexy) — MORE flattering than a plain snapshot, while staying tasteful and platform-safe (no nudity, no explicit or vulgar framing). In that case the `image_prompt` MUST: keep the SAME revealing / fitted outfit from the source frame (e.g. crop top, off-shoulder top, denim shorts, fitted dress) — never cover it up or swap it for modest clothing; keep full-body or knees-up framing so the whole figure and legs read; and add figure-flattering description: well-proportioned hourglass / slim-curvy body, defined waist, long legs, gentle S-curve posture, weight on one hip, graceful confident posing, smooth flattering skin, and warm glamour lighting that sculpts the body. Do NOT apply this for male subjects, children, product-only shots, or formal / corporate / professional contexts — keep those neutral and natural.\n\n"
         "Your output MUST be a valid JSON array of objects. Do not include any markdown formatting (like ```json), explanations, or text outside the JSON array."
     )
 
@@ -883,10 +884,14 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                         "distance, shot size, and crop as the sample frame: if the frame "
                         "is a full-body / knees-up shot, keep it full-body with the legs, "
                         "lower body, and full outfit visible — do NOT zoom into a tight "
-                        "upper-body or face portrait. Keep the same body pose, stance, "
-                        "hand and arm position, body angle, and the same facial expression "
-                        "as the frame (do NOT add a smile, open mouth, or a different "
-                        "pose). Same framing, same composition, same energy. "
+                        "upper-body or face portrait. Keep the EXACT same outfit as the "
+                        "frame, including any revealing or fitted clothing (crop top, "
+                        "off-shoulder top, denim shorts, fitted dress) — never cover it "
+                        "up, lengthen it, or swap it for more modest clothing. Keep the "
+                        "same natural body shape and proportions, the same body pose, "
+                        "stance, hand and arm position, body angle, and the same facial "
+                        "expression as the frame (do NOT add a smile, open mouth, or a "
+                        "different pose). Same framing, same composition, same energy. "
                     )
                     scene_image_prompt = f"{frame_fidelity_prefix}{image_prompt}"
                     if identity_prefix and identity_prefix not in scene_image_prompt:
