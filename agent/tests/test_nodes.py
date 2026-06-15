@@ -423,20 +423,26 @@ def test_story_script_sample_video_creates_reference_asset(client, monkeypatch):
     assert "continues the choreography" in second_video_data["prompt"]
 
     edges = detail["edges"]
-    # Every clip keeps the sample-video identity reference attached.
+    # The first generated/source image anchors every clip; raw sample refs feed
+    # image nodes only, not video nodes directly.
     assert all(
-        any(e["source_id"] == sample_ref["id"] and e["target_id"] == v["id"] for e in edges)
-        for v in video_nodes
-    )
-    # Each clip's PRIMARY start frame is its own scene's source-frame image
-    # node (a non-fallback edge), so it reproduces that shot.
-    for img, vid in zip(image_nodes, video_nodes):
-        assert any(
-            e["source_id"] == img["id"]
-            and e["target_id"] == vid["id"]
-            and e.get("target_handle") != "fallback-start-image"
+        any(
+            e["source_id"] == image_nodes[0]["id"]
+            and e["target_id"] == v["id"]
             for e in edges
         )
+        for v in video_nodes
+    )
+    assert not any(
+        e["source_id"] == sample_ref["id"] and e["target_id"] in {v["id"] for v in video_nodes}
+        for e in edges
+    )
+    assert any(
+        e["source_id"] == image_nodes[0]["id"]
+        and e["target_id"] == video_nodes[1]["id"]
+        and e["target_handle"] == "fallback-start-image"
+        for e in edges
+    )
 
 
 def test_story_script_character_reference_locks_identity_without_sample_video(client, monkeypatch):
@@ -514,6 +520,10 @@ def test_story_script_character_reference_locks_identity_without_sample_video(cl
         for e in detail["edges"]
     )
     assert any(
+        e["source_id"] == image_node["id"] and e["target_id"] == video_node["id"]
+        for e in detail["edges"]
+    )
+    assert not any(
         e["source_id"] == character["id"] and e["target_id"] == video_node["id"]
         for e in detail["edges"]
     )
