@@ -3,7 +3,7 @@ import { ensureBoardProject, createRequest, getRequest, patchNode } from "../api
 import { useBoardStore } from "./board";
 import { useSettingsStore } from "./settings";
 
-type PollEntry = { requestId: number; timerId: ReturnType<typeof setTimeout> | null; retryCount: number; opts: Parameters<GenerationState["dispatchGeneration"]>[1] };
+type PollEntry = { requestId: number; timerId: ReturnType<typeof setTimeout> | null; retryCount?: number; opts?: Parameters<GenerationState["dispatchGeneration"]>[1] };
 
 const STYLE_PROMPTS: Record<string, { prompt: string }> = {
   hollywood: {
@@ -122,8 +122,18 @@ interface GenerationState {
 const REF_SOURCE_TYPES = new Set(["character", "image", "visual_asset", "Storyboard"]);
 
 function collectUpstreamRefMediaIds(targetRfId: string): string[] {
+  return collectUpstreamRefsByType(targetRfId).all;
+}
+
+function collectUpstreamRefsByType(targetRfId: string): {
+  all: string[];
+  base: string[];
+  face: string[];
+} {
   const { nodes, edges } = useBoardStore.getState();
-  const ids: string[] = [];
+  const all: string[] = [];
+  const base: string[] = [];
+  const face: string[] = [];
   for (const e of edges) {
     if (e.target !== targetRfId) continue;
     const src = nodes.find((n) => n.id === e.source);
@@ -147,10 +157,24 @@ function collectUpstreamRefMediaIds(targetRfId: string): string[] {
       chosen = variants[0] as string;
     }
 
-    if (chosen) ids.push(chosen);
+    if (!chosen) continue;
+    all.push(chosen);
+    if (src.data.type === "character") {
+      face.push(chosen);
+    } else {
+      base.push(chosen);
+    }
   }
-  return ids;
+  return { all, base, face };
 }
+
+const AI_FACE_TRANSFER_PROMPT_LOCK = `
+
+Keep the sample image unchanged. Replace only the subject's face with the character reference face. Preserve pose, body, clothes, hair, background, lighting, framing, and all non-face details. Do not redraw the image.`;
+
+const VIDEO_NATURAL_MOTION_PROMPT_LOCK = `
+
+Motion requirement: natural real-time human movement at normal speed. No slow motion, no sluggish AI-like movement, no floating/gliding motion, no robotic timing. Use realistic body weight shifts, natural arm and leg timing, believable balance, normal camera/video timing, and fluid everyday human motion.`;
 
 export const useGenerationStore = create<GenerationState>((set, get) => ({
   active: {},
@@ -299,11 +323,12 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
             });
             return;
           }
+          const omniPrompt = `${finalPrompt}${VIDEO_NATURAL_MOTION_PROMPT_LOCK}`;
           reqDto = await createRequest({
             type: "gen_video_omni",
             node_id: isNaN(nodeDbId) ? undefined : nodeDbId,
             params: {
-              prompt: finalPrompt,
+              prompt: omniPrompt,
               project_id: projectId,
               ref_media_ids: ingredients,
               duration_s: settings.omniFlashDuration,
@@ -325,8 +350,9 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
             set({ error: "Veo i2v requires a source image (connect an upstream image node)" });
             return;
           }
+          const videoPrompt = `${finalPrompt}${VIDEO_NATURAL_MOTION_PROMPT_LOCK}`;
           const videoParams: Record<string, unknown> = {
-            prompt: finalPrompt,
+            prompt: videoPrompt,
             project_id: projectId,
             aspect_ratio: opts.aspectRatio ?? "VIDEO_ASPECT_RATIO_LANDSCAPE",
             // Tier precedence: explicit caller arg > auto-detected from
@@ -353,32 +379,62 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
           });
         }
       } else {
-        const refMediaIds = collectUpstreamRefMediaIds(rfId);
-        const params: Record<string, unknown> = {
-          prompt: finalPrompt,
-          project_id: projectId,
-          aspect_ratio: opts.aspectRatio ?? "IMAGE_ASPECT_RATIO_LANDSCAPE",
-          paygate_tier:
-            opts.paygateTier ?? get().paygateTier ?? "PAYGATE_TIER_ONE",
-          variant_count: variantCount,
-          // User's image model preference from the Settings panel.
-          // Backend resolves the nickname → real Flow model identifier.
-          image_model: useSettingsStore.getState().imageModel,
-        };
-        if (refMediaIds.length > 0) {
-          params.ref_media_ids = refMediaIds;
+        const upstreamRefs = collectUpstreamRefsByType(rfId);
+        const hasFaceTransfer = upstreamRefs.face.length > 0 && upstreamRefs.base.length > 0;
+        if (hasFaceTransfer) {
+          const currentNode = useBoardStore.getState().nodes.find((n) => n.id === rfId);
+          const lockedSourceMediaId =
+            typeof currentNode?.data.lockedSourceMediaId === "string" && currentNode.data.lockedSourceMediaId
+              ? currentNode.data.lockedSourceMediaId
+              : upstreamRefs.base[0];
+          const lockedFaceRefMediaId =
+            typeof currentNode?.data.lockedFaceRefMediaId === "string" && currentNode.data.lockedFaceRefMediaId
+              ? currentNode.data.lockedFaceRefMediaId
+              : upstreamRefs.face[0];
+          const editPrompt = AI_FACE_TRANSFER_PROMPT_LOCK.trim();
+          useBoardStore.getState().updateNodeData(rfId, { lockedSourceMediaId, lockedFaceRefMediaId });
+          reqDto = await createRequest({
+            type: "edit_image",
+            node_id: isNaN(nodeDbId) ? undefined : nodeDbId,
+            params: {
+              prompt: editPrompt,
+              project_id: projectId,
+              source_media_id: lockedSourceMediaId,
+              ref_media_ids: [lockedFaceRefMediaId],
+              aspect_ratio: opts.aspectRatio ?? "IMAGE_ASPECT_RATIO_LANDSCAPE",
+              paygate_tier:
+                opts.paygateTier ?? get().paygateTier ?? "PAYGATE_TIER_ONE",
+              image_model: useSettingsStore.getState().imageModel,
+              ai_face_transfer: true,
+            },
+          });
+        } else {
+          const params: Record<string, unknown> = {
+            prompt: finalPrompt,
+            project_id: projectId,
+            aspect_ratio: opts.aspectRatio ?? "IMAGE_ASPECT_RATIO_LANDSCAPE",
+            paygate_tier:
+              opts.paygateTier ?? get().paygateTier ?? "PAYGATE_TIER_ONE",
+            variant_count: variantCount,
+            // User's image model preference from the Settings panel.
+            // Backend resolves the nickname → real Flow model identifier.
+            image_model: useSettingsStore.getState().imageModel,
+          };
+          if (upstreamRefs.all.length > 0) {
+            params.ref_media_ids = upstreamRefs.all;
+          }
+          // Per-variant prompts: when present, each variant uses its own
+          // text instead of all sharing `params.prompt`. Backend falls back
+          // to single prompt when missing/short.
+          if (finalPrompts && finalPrompts.length > 0) {
+            params.prompts = finalPrompts;
+          }
+          reqDto = await createRequest({
+            type: "gen_image",
+            node_id: isNaN(nodeDbId) ? undefined : nodeDbId,
+            params,
+          });
         }
-        // Per-variant prompts: when present, each variant uses its own
-        // text instead of all sharing `params.prompt`. Backend falls back
-        // to single prompt when missing/short.
-        if (finalPrompts && finalPrompts.length > 0) {
-          params.prompts = finalPrompts;
-        }
-        reqDto = await createRequest({
-          type: "gen_image",
-          node_id: isNaN(nodeDbId) ? undefined : nodeDbId,
-          params,
-        });
       }
     } catch (err) {
       useBoardStore.getState().updateNodeData(rfId, { status: "error", error: err instanceof Error ? err.message : "request failed" });
@@ -470,6 +526,12 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
               aspectRatio: opts.aspectRatio,
               renderedAt: new Date().toISOString(),
               error: partialError ?? undefined,
+              ...(typeof req.params["source_media_id"] === "string"
+                ? { lockedSourceMediaId: req.params["source_media_id"] as string }
+                : {}),
+              ...(Array.isArray(req.params["ref_media_ids"]) && typeof req.params["ref_media_ids"][0] === "string"
+                ? { lockedFaceRefMediaId: req.params["ref_media_ids"][0] as string }
+                : {}),
               ...(stampedImageModel ? { imageModel: stampedImageModel } : {}),
               ...(stampedVideoQuality ? { videoQuality: stampedVideoQuality } : {}),
             });
@@ -503,6 +565,12 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
                   // when this run was clean; otherwise persist the
                   // partial summary so it survives reload.
                   error: partialError ?? null,
+                  ...(typeof req.params["source_media_id"] === "string"
+                    ? { lockedSourceMediaId: req.params["source_media_id"] as string }
+                    : {}),
+                  ...(Array.isArray(req.params["ref_media_ids"]) && typeof req.params["ref_media_ids"][0] === "string"
+                    ? { lockedFaceRefMediaId: req.params["ref_media_ids"][0] as string }
+                    : {}),
                   ...(stampedImageModel ? { imageModel: stampedImageModel } : {}),
                   ...(stampedVideoQuality ? { videoQuality: stampedVideoQuality } : {}),
                 },

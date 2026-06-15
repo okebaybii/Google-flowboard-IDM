@@ -35,8 +35,18 @@ def get_face_swap_models():
         return None, None
 
 
+def _largest_face(faces):
+    """Return the largest detected face by bbox area."""
+    if not faces:
+        return None
+    return max(
+        faces,
+        key=lambda f: max(0, float(f.bbox[2] - f.bbox[0])) * max(0, float(f.bbox[3] - f.bbox[1])),
+    )
+
+
 def swap_faces_in_image(char_img_path: str, target_img_path: str, output_path: str) -> bool:
-    """Swap face from character image to target image and save result."""
+    """Swap the largest character face onto the largest target face."""
     app, swapper = get_face_swap_models()
     if not app or not swapper:
         return False
@@ -48,22 +58,17 @@ def swap_faces_in_image(char_img_path: str, target_img_path: str, output_path: s
         if src_img is None or tgt_img is None:
             return False
             
-        src_faces = app.get(src_img)
-        if not src_faces:
+        source_face = _largest_face(app.get(src_img))
+        if source_face is None:
             logger.warning("No face found in character reference image")
             return False
             
-        tgt_faces = app.get(tgt_img)
-        if not tgt_faces:
+        target_face = _largest_face(app.get(tgt_img))
+        if target_face is None:
             logger.warning("No face found in target image")
             return False
             
-        source_face = src_faces[0]
-        result_img = tgt_img.copy()
-        
-        for face in tgt_faces:
-            result_img = swapper.get(result_img, face, source_face, paste_back=True)
-            
+        result_img = swapper.get(tgt_img.copy(), target_face, source_face, paste_back=True)
         cv2.imwrite(output_path, result_img)
         return True
     except Exception as e:
@@ -72,7 +77,7 @@ def swap_faces_in_image(char_img_path: str, target_img_path: str, output_path: s
 
 
 def swap_faces_in_video(char_img_path: str, video_path: str, output_path: str) -> bool:
-    """Perform frame-by-frame face swap on video clip using MoviePy."""
+    """Perform frame-by-frame face swap on the largest face in each video frame."""
     app, swapper = get_face_swap_models()
     if not app or not swapper:
         return False
@@ -85,23 +90,19 @@ def swap_faces_in_video(char_img_path: str, video_path: str, output_path: str) -
         if char_img is None:
             return False
             
-        src_faces = app.get(char_img)
-        if not src_faces:
+        source_face = _largest_face(app.get(char_img))
+        if source_face is None:
             logger.warning("No face found in character image. Skipping face swap.")
             return False
-        source_face = src_faces[0]
         
         def process_frame(frame):
             # MoviePy uses RGB, CV2 uses BGR
             bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            faces = app.get(bgr_frame)
-            if not faces:
+            target_face = _largest_face(app.get(bgr_frame))
+            if target_face is None:
                 return frame
             
-            result_frame = bgr_frame.copy()
-            for face in faces:
-                result_frame = swapper.get(result_frame, face, source_face, paste_back=True)
-                
+            result_frame = swapper.get(bgr_frame.copy(), target_face, source_face, paste_back=True)
             return cv2.cvtColor(result_frame, cv2.COLOR_BGR2RGB)
             
         clip = VideoFileClip(video_path)

@@ -1161,7 +1161,8 @@ class WorkerController:
 
             if not err and node_id is not None and req_type in ("gen_image", "gen_video", "gen_video_omni", "edit_image", "upscale_video"):
                 try:
-                    apply_face_swap_to_node_media(node_id, req_type, result)
+                    if not params.get("ai_face_transfer"):
+                        apply_face_swap_to_node_media(node_id, req_type, result, params)
                 except Exception as fs_err:
                     logger.error(f"Face swap post-processing failed: {fs_err}")
 
@@ -1280,47 +1281,39 @@ def get_worker() -> WorkerController:
     return _worker
 
 
-def apply_face_swap_to_node_media(node_id: int, request_type: str, result: dict):
-    """Post-process generated images or videos with character face swapping if an upstream Character node is connected."""
+def apply_face_swap_to_node_media(node_id: int, request_type: str, result: dict, params: Optional[dict] = None):
+    """Post-process generated media with character face swap when explicit/upstream face refs exist."""
     import os
     from sqlmodel import select
     from flowboard.db.models import Node, Edge
     from flowboard.services import media as media_service
     from flowboard.services.face_swapper import swap_faces_in_image, swap_faces_in_video
-    
+
+    params = params or {}
+    explicit_face_refs = params.get("face_ref_media_ids")
+    face_ref_ids = [m for m in explicit_face_refs if isinstance(m, str) and m.strip()] if isinstance(explicit_face_refs, list) else []
+
     with get_session() as session:
-        # Find upstream character nodes
-        edges = session.exec(select(Edge).where(Edge.target_id == node_id)).all()
-        char_node = None
-        for e in edges:
-            src = session.get(Node, e.source_id)
-            if src and src.type == "character":
-                char_node = src
-                break
-                
-        if not char_node:
-            node = session.get(Node, node_id)
-            if node:
-                char_node = session.exec(
-                    select(Node).where(
-                        Node.board_id == node.board_id,
-                        Node.type == "character"
-                    )
-                ).first()
-                
-        if not char_node:
-            return
-            
-        char_media_id = char_node.data.get("mediaId")
-        if not char_media_id:
-            return
-            
-        char_path = media_service.cached_path(char_media_id)
-        if not char_path or not char_path.exists():
-            return
-            
-        char_path_str = str(char_path)
-        
+        if not face_ref_ids:
+            # Legacy fallback: direct upstream Character only. Do not fall back to
+            # any random board Character; that caused unintended identity swaps.
+            edges = session.exec(select(Edge).where(Edge.target_id == node_id)).all()
+            for e in edges:
+                src = session.get(Node, e.source_id)
+                if src and src.type == "character":
+                    char_media_id = (src.data or {}).get("mediaId")
+                    if isinstance(char_media_id, str) and char_media_id.strip():
+                        face_ref_ids.append(char_media_id.strip())
+                    break
+
+    if not face_ref_ids:
+        return
+
+    char_path = media_service.cached_path(face_ref_ids[0])
+    if not char_path or not char_path.exists():
+        return
+    char_path_str = str(char_path)
+
     # Get the generated media ids from result
     media_ids = result.get("media_ids") or [result.get("media_id")]
     media_ids = [m for m in media_ids if m]
