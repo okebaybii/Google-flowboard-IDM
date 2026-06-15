@@ -791,17 +791,21 @@ async def _assemble_videos_impl(
         raise he
         
     except Exception as e:
-        logger.error(f"Error compiling video assembly node: {str(e)}")
+        import traceback
+        diagnostic = f"{type(e).__name__}: {e!r}"
+        logger.exception("Error compiling video assembly node: %s", diagnostic)
         with get_session() as s:
             node = s.get(Node, node_id)
             if node:
                 node.status = "error"
                 node_data = dict(node.data)
                 node_data["assemblyProgress"] = 0
+                node_data["lastAssemblyError"] = diagnostic
+                node_data["lastAssemblyTraceback"] = traceback.format_exc()[-4000:]
                 node.data = node_data
                 s.add(node)
                 s.commit()
-        raise HTTPException(status_code=500, detail=f"Assembly failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Assembly failed: {diagnostic}")
 
 
 @router.post("/node/{node_id}/assemble")

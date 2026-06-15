@@ -2,11 +2,40 @@ import os
 import subprocess
 import uuid
 import asyncio
+import shutil
 from pathlib import Path
 from typing import Optional
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_ffmpeg() -> str:
+    repo_root = Path(__file__).resolve().parents[3]
+    local_ffmpeg = repo_root / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe"
+    if local_ffmpeg.exists():
+        return str(local_ffmpeg)
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return ffmpeg
+    raise RuntimeError(
+        "FFmpeg not found. Run install-all.bat to install local FFmpeg, or install FFmpeg and add it to PATH, then restart the backend."
+    )
+
+
+async def _run_command(cmd: list[str], *, error_label: str) -> None:
+    try:
+        await asyncio.to_thread(subprocess.run, cmd, check=True, capture_output=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "FFmpeg not found. Run install-all.bat to install local FFmpeg, or install FFmpeg and add it to PATH, then restart the backend."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode("utf-8", errors="ignore") if exc.stderr else ""
+        logger.error("%s: %s", error_label, stderr)
+        detail = stderr.strip()[-1200:] if stderr.strip() else str(exc)
+        raise RuntimeError(f"{error_label}: {detail}") from exc
+
 
 async def _process_single_clip(i: int, vpath: str, narr: str, temp_dir: Path, aspect_ratio: str, sem: asyncio.Semaphore) -> str:
     from flowboard.services.tts import generate_speech
@@ -28,20 +57,39 @@ async def _process_single_clip(i: int, vpath: str, narr: str, temp_dir: Path, as
         try:
             if narr and narr.strip():
                 tts_audio = temp_dir / f"tts_{i}_{uuid.uuid4().hex}.wav"
-                await generate_speech(narr.strip(), str(tts_audio))
-                
-                cmd = [
-                    "ffmpeg", "-y", "-i", vpath, "-i", str(tts_audio),
-                    "-vf", vf_scale,
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                    "-c:a", "aac", "-b:a", "192k",
-                    "-map", "0:v:0", "-map", "1:a:0",
-                    "-shortest", str(clip_out)
-                ]
-                await asyncio.to_thread(subprocess.run, cmd, check=True, capture_output=True)
+                try:
+                    await generate_speech(narr.strip(), str(tts_audio))
+                except Exception as exc:
+                    logger.warning("TTS failed for clip %s; continuing without narration: %s", i, exc)
+                    tts_audio = None
+
+                if tts_audio is not None:
+                    ffmpeg = _resolve_ffmpeg()
+                    cmd = [
+                        ffmpeg, "-y", "-i", vpath, "-i", str(tts_audio),
+                        "-vf", vf_scale,
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-map", "0:v:0", "-map", "1:a:0",
+                        "-shortest", str(clip_out)
+                    ]
+                    await _run_command(cmd, error_label=f"Failed to process clip {i}")
+                else:
+                    ffmpeg = _resolve_ffmpeg()
+                    cmd = [
+                        ffmpeg, "-y", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=24000",
+                        "-i", vpath,
+                        "-vf", vf_scale,
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-map", "1:v:0", "-map", "0:a:0",
+                        "-shortest", str(clip_out)
+                    ]
+                    await _run_command(cmd, error_label=f"Failed to process clip {i}")
             else:
+                ffmpeg = _resolve_ffmpeg()
                 cmd = [
-                    "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=24000",
+                    ffmpeg, "-y", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=24000",
                     "-i", vpath,
                     "-vf", vf_scale,
                     "-c:v", "libx264", "-preset", "fast", "-crf", "23",
@@ -49,12 +97,11 @@ async def _process_single_clip(i: int, vpath: str, narr: str, temp_dir: Path, as
                     "-map", "1:v:0", "-map", "0:a:0",
                     "-shortest", str(clip_out)
                 ]
-                await asyncio.to_thread(subprocess.run, cmd, check=True, capture_output=True)
+                await _run_command(cmd, error_label=f"Failed to process clip {i}")
                 
             return str(clip_out)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"FFmpeg error processing clip {i}: {e.stderr.decode('utf-8', errors='ignore')}")
-            raise RuntimeError(f"Failed to process clip {i}") from e
+        except RuntimeError:
+            raise
 
 async def _run_ffmpeg_assembly(
     video_paths: list[str],
@@ -80,35 +127,30 @@ async def _run_ffmpeg_assembly(
     concat_list = temp_dir / f"concat_{uuid.uuid4().hex}.txt"
     with open(concat_list, "w", encoding="utf-8") as f:
         for p in processed_clips:
-            p_esc = str(p).replace("'", "'\\''")
+            p_abs = Path(p).resolve().as_posix()
+            p_esc = p_abs.replace("'", "'\\''")
             f.write(f"file '{p_esc}'\n")
             
     concat_out = temp_dir / f"concat_out_{uuid.uuid4().hex}.mp4"
+    ffmpeg = _resolve_ffmpeg()
     cmd = [
-        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        ffmpeg, "-y", "-f", "concat", "-safe", "0",
         "-i", str(concat_list),
         "-c", "copy",
         str(concat_out)
     ]
-    try:
-        await asyncio.to_thread(subprocess.run, cmd, check=True, capture_output=True)
-    except subprocess.CalledProcessError as e:
-        logger.error(f"FFmpeg concat error: {e.stderr.decode('utf-8', errors='ignore')}")
-        raise RuntimeError("Failed to concatenate clips") from e
+    await _run_command(cmd, error_label="Failed to concatenate clips")
     
     if audio_path:
+        ffmpeg = _resolve_ffmpeg()
         cmd = [
-            "ffmpeg", "-y", "-i", str(concat_out), "-i", audio_path,
+            ffmpeg, "-y", "-i", str(concat_out), "-i", audio_path,
             "-filter_complex", "[0:a]volume=1.0[narr];[1:a]volume=0.2[bg];[narr][bg]amix=inputs=2:duration=first[a]",
             "-map", "0:v", "-map", "[a]",
             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
             output_path
         ]
-        try:
-            await asyncio.to_thread(subprocess.run, cmd, check=True, capture_output=True)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"FFmpeg mix error: {e.stderr.decode('utf-8', errors='ignore')}")
-            raise RuntimeError("Failed to mix background audio") from e
+        await _run_command(cmd, error_label="Failed to mix background audio")
     else:
         import shutil
         shutil.move(str(concat_out), output_path)

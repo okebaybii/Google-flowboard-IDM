@@ -398,11 +398,11 @@ def test_story_script_sample_video_creates_reference_asset(client, monkeypatch):
     # a new AI image node. Each generated image then anchors only its matching clip.
     image_nodes = sorted(
         [n for n in detail["nodes"] if n["type"] == "image"],
-        key=lambda n: n["x"],
+        key=lambda n: n["data"]["sequenceIndex"],
     )
     video_nodes = sorted(
         [n for n in detail["nodes"] if n["type"] == "video"],
-        key=lambda n: n["x"],
+        key=lambda n: n["data"]["sequenceIndex"],
     )
     assert len(image_nodes) == 2
     assert len(video_nodes) == 2
@@ -411,6 +411,12 @@ def test_story_script_sample_video_creates_reference_asset(client, monkeypatch):
         assert img["status"] == "idle"
         assert img["data"]["sourceVideoFrameMediaId"] == media_id
         assert img["data"]["sequenceIndex"] == idx
+        assert img["x"] == story["x"] + 640
+        assert img["y"] == story["y"] + idx * 240
+        assert video_nodes[idx]["x"] == story["x"] + 960
+        assert video_nodes[idx]["y"] == story["y"] + idx * 240
+        assert frame_refs[idx]["x"] == story["x"] + 320
+        assert frame_refs[idx]["y"] == story["y"] + idx * 240
 
     first_video_data = video_nodes[0]["data"]
     second_video_data = video_nodes[1]["data"]

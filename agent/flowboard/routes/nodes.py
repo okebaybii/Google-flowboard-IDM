@@ -766,8 +766,8 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                         board_id=board_id,
                         short_id=frame_short_id,
                         type="visual_asset",
-                        x=base_x + (i + 1) * 320,
-                        y=base_y - 320,
+                        x=base_x + 320,
+                        y=base_y + i * 240,
                         data={
                             "title": scene.get("title", f"Scene {i+1} - Sample frame"),
                             "prompt": (
@@ -798,8 +798,8 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                         board_id=board_id,
                         short_id=img_short_id,
                         type="image",
-                        x=base_x + (i + 1) * 320,
-                        y=base_y - 100,
+                        x=base_x + 640,
+                        y=base_y + i * 240,
                         data={
                             "title": scene.get("title", f"Scene {i+1} - Image"),
                             "prompt": scene_image_prompt,
@@ -885,15 +885,12 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                     board_id=board_id,
                     short_id=vid_short_id,
                     type="video",
-                    x=base_x + (i + 1) * 320,
-                    y=base_y + 120,
+                    x=base_x + 960,
+                    y=base_y + i * 240,
                     data={
-                        "title": scene.get("title", f"Cáº£nh {i+1} - Clip"),
+                        "title": scene.get("title", f"Scene {i+1} - Clip"),
                         "prompt": combined_prompt,
                         "narration": scene.get("narration", ""),
-                        # Portrait default to match the Video Assembly batch
-                        # default (9:16) â€” avoids spurious aspect_mismatch
-                        # regeneration when the chain is built by Generate All.
                         "aspectRatio": "VIDEO_ASPECT_RATIO_PORTRAIT",
                         "sourceImagePrompt": image_prompt,
                         "sourceVideoPrompt": video_prompt,

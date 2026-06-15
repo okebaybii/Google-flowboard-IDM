@@ -9,7 +9,7 @@ REM Check for Python
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo [ERROR] Python is not installed or not in PATH!
-    echo Please install Python (3.10+ recommended) and check "Add Python to PATH".
+    echo Please install Python 3.10+ recommended and check "Add Python to PATH".
     pause
     exit /b 1
 )
@@ -23,17 +23,23 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-REM Check for ffmpeg (required for video assembly / audio muxing)
+REM Check/install local ffmpeg (required for video assembly / audio muxing)
+set "LOCAL_FFMPEG=%~dp0tools\ffmpeg\bin\ffmpeg.exe"
 ffmpeg -version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [WARNING] ffmpeg is not installed or not in PATH!
-    echo Video assembly and audio muxing features will NOT work without it.
-    echo Install it from https://ffmpeg.org/download.html and add it to PATH,
-    echo or via winget:  winget install Gyan.FFmpeg
-    echo.
-    echo Press any key to continue installation anyway...
-    pause >nul
+    if exist "%LOCAL_FFMPEG%" (
+        echo Local FFmpeg found: %LOCAL_FFMPEG%
+    ) else (
+        echo [INFO] FFmpeg not found in PATH. Installing local FFmpeg...
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-ffmpeg.ps1"
+        if %errorlevel% neq 0 (
+            echo [ERROR] Failed to install FFmpeg.
+            pause
+            exit /b 1
+        )
+    )
 )
+set "PATH=%~dp0tools\ffmpeg\bin;%PATH%"
 
 echo [1/2] Installing Backend (Agent) dependencies...
 cd /d "%~dp0\agent"

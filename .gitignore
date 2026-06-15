@@ -63,3 +63,7 @@ temp_test_*.mp3
 scratch/
 scratch_inspect.py
 
+# Local tool downloads / generated assembly temp files
+tools/ffmpeg/
+agent/temp_assembly/
+temp_assembly/

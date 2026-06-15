@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -12,8 +13,8 @@ TTS_SAMPLE_RATE = int(os.environ.get("TTS_SAMPLE_RATE", "24000"))
 
 logger = logging.getLogger(__name__)
 
-# Default to python3.10 (has torch/torchaudio/omnivoice); override with TTS_PYTHON_BIN if needed
-PYTHON_BIN = os.environ.get("TTS_PYTHON_BIN", "python3.10")
+# Use the current backend Python by default on Windows; override with TTS_PYTHON_BIN if needed.
+PYTHON_BIN = os.environ.get("TTS_PYTHON_BIN") or sys.executable
 
 # Inline script template for TTS generation via subprocess
 _TTS_SCRIPT = """
@@ -111,10 +112,13 @@ async def generate_speech(
 
 def _run_tts_subprocess(args: dict) -> dict:
     """Run TTS subprocess."""
-    proc = subprocess.run(
-        [PYTHON_BIN, "-c", _TTS_SCRIPT, json.dumps(args)],
-        capture_output=True, text=True, timeout=120,
-    )
+    try:
+        proc = subprocess.run(
+            [PYTHON_BIN, "-c", _TTS_SCRIPT, json.dumps(args)],
+            capture_output=True, text=True, timeout=120,
+        )
+    except FileNotFoundError as exc:
+        return {"ok": False, "error": f"TTS Python not found: {PYTHON_BIN}. Set TTS_PYTHON_BIN or use the backend virtualenv Python."}
     if proc.returncode != 0:
         return {"ok": False, "error": proc.stderr[-500:] if proc.stderr else "unknown error"}
     try:
@@ -240,10 +244,14 @@ async def generate_video_narration(
 def _run_batch_subprocess(args: dict) -> list[dict]:
     """Run batch TTS subprocess. Model loads once."""
     timeout = 180 + len(args.get("items", [])) * 45  # ~180s model load + ~45s per scene
-    proc = subprocess.run(
-        [PYTHON_BIN, "-c", _TTS_BATCH_SCRIPT, json.dumps(args)],
-        capture_output=True, text=True, timeout=timeout,
-    )
+    try:
+        proc = subprocess.run(
+            [PYTHON_BIN, "-c", _TTS_BATCH_SCRIPT, json.dumps(args)],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except FileNotFoundError:
+        error = f"TTS Python not found: {PYTHON_BIN}. Set TTS_PYTHON_BIN or use the backend virtualenv Python."
+        return [{"id": item["id"], "ok": False, "error": error} for item in args["items"]]
     if proc.returncode != 0:
         error = proc.stderr[-500:] if proc.stderr else "unknown"
         return [{"id": item["id"], "ok": False, "error": error} for item in args["items"]]
