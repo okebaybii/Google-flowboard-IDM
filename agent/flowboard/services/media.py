@@ -230,6 +230,62 @@ def _mime_from_ext(ext: str) -> str:
     return "application/octet-stream"
 
 
+def _extract_sharpest_video_frame(video_path: str, out_path: str) -> bool:
+    """Pick the least-blurry frame from a video and save it as JPEG.
+
+    Uses Laplacian variance as a sharpness score. Sampling avoids decoding the
+    whole clip while still skipping motion-blurred first/last frames.
+    """
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return False
+
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if frame_count <= 0:
+            return False
+
+        # Sample up to 32 frames, ignoring the first/last 5% where cuts and
+        # transition blur are common. Fall back to full span for very short clips.
+        samples = min(32, frame_count)
+        start = int(frame_count * 0.05) if frame_count > 20 else 0
+        end = int(frame_count * 0.95) if frame_count > 20 else frame_count - 1
+        if end <= start:
+            start, end = 0, frame_count - 1
+
+        best_score = -1.0
+        best_frame = None
+        for i in range(samples):
+            idx = start + round((end - start) * (i / max(1, samples - 1)))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            # Prefer frames that are not extremely dark/bright.
+            brightness = float(gray.mean())
+            exposure_penalty = 0.65 if brightness < 35 or brightness > 235 else 1.0
+            score = sharpness * exposure_penalty
+            if score > best_score:
+                best_score = score
+                best_frame = frame.copy()
+
+        cap.release()
+        if best_frame is None:
+            return False
+
+        # Gentle unsharp mask: improves soft video frames without changing layout.
+        blurred = cv2.GaussianBlur(best_frame, (0, 0), 1.0)
+        sharpened = cv2.addWeighted(best_frame, 1.35, blurred, -0.35, 0)
+        return bool(cv2.imwrite(out_path, sharpened, [int(cv2.IMWRITE_JPEG_QUALITY), 95]))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sharpest-frame extraction failed, falling back to ffmpeg: %s", exc)
+        return False
+
+
 async def extract_last_frame_and_upload(video_media_id: str, project_id: str) -> str:
     """Extracts the last frame of a video asset and uploads it to Flow as an image."""
     from sqlmodel import select
@@ -249,11 +305,12 @@ async def extract_last_frame_and_upload(video_media_id: str, project_id: str) ->
         out_path = tmp_out.name
     
     try:
-        cmd = [
-            "ffmpeg", "-y", "-sseof", "-0.1", "-i", asset.local_path,
-            "-update", "1", "-q:v", "2", out_path
-        ]
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        if not _extract_sharpest_video_frame(asset.local_path, out_path):
+            cmd = [
+                "ffmpeg", "-y", "-sseof", "-0.1", "-i", asset.local_path,
+                "-update", "1", "-q:v", "2", out_path
+            ]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
         
         with open(out_path, "rb") as f:
             b64_data = base64.b64encode(f.read()).decode("utf-8")
@@ -301,11 +358,12 @@ async def extract_first_frame_and_upload(video_media_id: str, project_id: str) -
         out_path = tmp_out.name
     
     try:
-        cmd = [
-            "ffmpeg", "-y", "-i", asset.local_path,
-            "-vframes", "1", "-q:v", "2", out_path
-        ]
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        if not _extract_sharpest_video_frame(asset.local_path, out_path):
+            cmd = [
+                "ffmpeg", "-y", "-i", asset.local_path,
+                "-vframes", "1", "-q:v", "2", out_path
+            ]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
         
         with open(out_path, "rb") as f:
             b64_data = base64.b64encode(f.read()).decode("utf-8")
