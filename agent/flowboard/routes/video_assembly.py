@@ -905,11 +905,36 @@ def _collect_reference_media_ids(
     incoming_edges: dict[int, list[Edge]],
     allowed_types: set[str],
 ) -> list[str]:
+    upstream_nodes = [
+        session.get(Node, edge.source_id)
+        for edge in incoming_edges.get(node_id, [])
+    ]
+    upstream_nodes = [n for n in upstream_nodes if n is not None]
+
+    # When a character ref is present, source-video sample frames must NOT be
+    # sent as image inputs — they contain the original video person's face and
+    # trigger PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED (scene 1) or cause
+    # face-identity drift (later scenes).
+    has_character = any(n.type == "character" for n in upstream_nodes)
+
     refs: list[str] = []
     seen: set[str] = set()
-    for edge in incoming_edges.get(node_id, []):
-        src = session.get(Node, edge.source_id)
-        if not src or src.type not in allowed_types:
+    for src in upstream_nodes:
+        if src.type not in allowed_types:
+            continue
+        # Skip source-video frames when a character is present.
+        if (
+            has_character
+            and src.type == "visual_asset"
+            and (src.data or {}).get("sourceVideoFrame")
+        ):
+            continue
+        # Find the matching edge to pass to _select_node_media_id.
+        edge = next(
+            (e for e in incoming_edges.get(node_id, []) if e.source_id == src.id),
+            None,
+        )
+        if edge is None:
             continue
         media_id = _select_node_media_id(src, edge)
         if media_id and media_id not in seen:
