@@ -402,12 +402,28 @@ async def run_pipeline(
         upstream_nodes = [node_by_id[u] for u in upstream_node_ids if u in node_by_id]
 
         if node.type in ("image", "Storyboard"):
-            ref_media_ids = [
-                (u.data or {}).get("mediaId")
-                for u in upstream_nodes
-                if u.type in ("character", "image", "visual_asset", "Storyboard")
-                and isinstance((u.data or {}).get("mediaId"), str)
-            ]
+            # Check whether any upstream character node is present.
+            has_character_upstream = any(u.type == "character" for u in upstream_nodes)
+
+            ref_media_ids = []
+            for u in upstream_nodes:
+                if u.type not in ("character", "image", "visual_asset", "Storyboard"):
+                    continue
+                mid = (u.data or {}).get("mediaId")
+                if not isinstance(mid, str) or not mid:
+                    continue
+                # When a character ref is present, skip visual_asset nodes that
+                # are timeline sample frames from the source video. Those frames
+                # contain the original video person's face — including them in
+                # ref_media_ids alongside a character ref confuses the model and
+                # causes face-identity drift in scenes after the first one.
+                if (
+                    has_character_upstream
+                    and u.type == "visual_asset"
+                    and (u.data or {}).get("sourceVideoFrame")
+                ):
+                    continue
+                ref_media_ids.append(mid)
             ref_media_ids = [m for m in ref_media_ids if m]
             params = {
                 "prompt": prompt.strip(),
