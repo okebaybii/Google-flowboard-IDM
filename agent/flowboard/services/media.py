@@ -247,9 +247,9 @@ def _extract_sharpest_video_frame(video_path: str, out_path: str) -> bool:
         if frame_count <= 0:
             return False
 
-        # Sample up to 32 frames, ignoring the first/last 5% where cuts and
+        # Sample up to 64 frames, ignoring the first/last 5% where cuts and
         # transition blur are common. Fall back to full span for very short clips.
-        samples = min(32, frame_count)
+        samples = min(64, frame_count)
         start = int(frame_count * 0.05) if frame_count > 20 else 0
         end = int(frame_count * 0.95) if frame_count > 20 else frame_count - 1
         if end <= start:
@@ -263,12 +263,31 @@ def _extract_sharpest_video_frame(video_path: str, out_path: str) -> bool:
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
+
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-            # Prefer frames that are not extremely dark/bright.
-            brightness = float(gray.mean())
-            exposure_penalty = 0.65 if brightness < 35 or brightness > 235 else 1.0
-            score = sharpness * exposure_penalty
+            h, w = gray.shape[:2]
+
+            # Whole-frame score alone can pick a sharp door/wall while the
+            # dancer is motion-blurred. Weight the center/upper-body area.
+            cx1, cx2 = int(w * 0.18), int(w * 0.82)
+            cy1, cy2 = int(h * 0.12), int(h * 0.88)
+            center = gray[cy1:cy2, cx1:cx2]
+            upper = gray[int(h * 0.12):int(h * 0.58), int(w * 0.22):int(w * 0.78)]
+
+            full_sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            center_sharpness = float(cv2.Laplacian(center, cv2.CV_64F).var()) if center.size else 0.0
+            upper_sharpness = float(cv2.Laplacian(upper, cv2.CV_64F).var()) if upper.size else 0.0
+
+            brightness = float(center.mean()) if center.size else float(gray.mean())
+            exposure_penalty = 0.55 if brightness < 35 or brightness > 235 else 1.0
+
+            # Prefer frames where the subject region is crisp, not just the
+            # room edges. Upper-body often includes face + torso in vertical dance samples.
+            score = (
+                center_sharpness * 0.55
+                + upper_sharpness * 0.30
+                + full_sharpness * 0.15
+            ) * exposure_penalty
             if score > best_score:
                 best_score = score
                 best_frame = frame.copy()

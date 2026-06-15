@@ -78,6 +78,42 @@ _SYNTH_SYSTEM_IMAGE = (
     "language, no preamble — output the prompt only."
 )
 
+# Appended to every image system prompt to push the result from a flat,
+# catalog-stiff body toward editorial GLAMOUR — alluring and figure-flattering
+# while staying tasteful/SFW (these images publish to social platforms that ban
+# explicit content). It adds curve-aware posing, sculpting light, and a magnetic
+# aura; it does NOT override the closed-mouth / camera-gaze rules above (those
+# exist for Veo i2v identity stability).
+_ALLURE_CLAUSE = (
+    "\n\nALLURE — CONDITIONAL. Apply the glamour styling below ONLY when BOTH "
+    "are true: (a) the subject is a WOMAN, and (b) the scene is a casual / "
+    "fashion / lifestyle / dance / beauty / social-media context that suits an "
+    "alluring look. DO NOT apply it for male subjects, children, product-only "
+    "shots, or formal / corporate / professional / news / religious / sport / "
+    "uniform contexts — keep those neutral and natural. When it does NOT apply, "
+    "ignore this whole section.\n"
+    "When it DOES apply, make the figure look striking and attractive, "
+    "editorial-glamour not catalog-flat (tasteful / SFW, no nudity, no explicit "
+    "or vulgar framing):\n"
+    "  • SILHOUETTE: pose to flatter the body line — gentle S-curve, "
+    "lengthened neck and spine, waist defined, weight shifted onto one "
+    "hip, shoulders and hips on slightly opposing angles. Elegant, "
+    "confident, never stiff or slumped.\n"
+    "  • LINES: long extended legs and graceful arm lines; a slight back "
+    "arch or chin-down-eyes-up angle reads alluring without being "
+    "explicit.\n"
+    "  • WARDROBE: let the garment fit the figure and drape well so the "
+    "silhouette reads — flattering tailoring, but keep coverage tasteful "
+    "and platform-safe.\n"
+    "  • LIGHT: glamour lighting that sculpts the body — soft directional "
+    "key with a gentle rim/edge light separating the figure, subtle "
+    "shadow to give form and depth. Warm, cinematic, magazine-cover feel.\n"
+    "  • AURA: magnetic, sensual-but-classy presence and confident eye "
+    "contact — alluring attitude, poised, never crude.\n"
+    "  • SKIN/DETAIL: natural flattering skin with healthy sheen, crisp "
+    "focus on the subject, soft depth of field on the background."
+)
+
 # Appended to the image system prompt when the upstream graph contains
 # 2+ distinct people (multiple character nodes, or image siblings each
 # wrapping a different character grandparent — e.g. couple shots, group
@@ -442,8 +478,8 @@ def _image_system_prompt(subject_count: int) -> str:
     `ref_image_N` label.
     """
     if subject_count >= 2:
-        return _SYNTH_SYSTEM_IMAGE + _MULTI_SUBJECT_CLAUSE
-    return _SYNTH_SYSTEM_IMAGE
+        return _SYNTH_SYSTEM_IMAGE + _ALLURE_CLAUSE + _MULTI_SUBJECT_CLAUSE
+    return _SYNTH_SYSTEM_IMAGE + _ALLURE_CLAUSE
 
 
 def _format_user_message(records: list[dict], target: Node) -> str:

@@ -4009,10 +4009,62 @@ button:disabled {
   box-shadow: 0 0 0 2px rgba(124, 92, 255, 0.35);
 }
 
-/* Inline variant picker for a Source Reference chip — opens below
-   the chip when the user clicks a multi-variant chip. Lists every
-   variant of that source so the user can repin without leaving the
-   GenerationDialog. */
+.ref-source-chip--clickable {
+  cursor: zoom-in;
+  appearance: none;
+  font: inherit;
+  transition: border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+
+.ref-source-chip--clickable:hover,
+.ref-source-chip--clickable:focus-visible {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 2px rgba(124, 92, 255, 0.28);
+  outline: none;
+}
+
+.source-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: rgba(3, 6, 18, 0.86);
+  backdrop-filter: blur(12px);
+}
+
+.source-preview__img {
+  max-width: min(92vw, 1100px);
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+}
+
+.source-preview__close {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(16, 20, 34, 0.86);
+  color: #fff;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.source-preview__close:hover,
+.source-preview__close:focus-visible {
+  background: rgba(124, 92, 255, 0.9);
+  outline: none;
+}
+
 .ref-source-chip__picker {
   position: absolute;
   top: calc(100% + 4px);

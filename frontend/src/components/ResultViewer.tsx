@@ -92,6 +92,7 @@ export function ResultViewer() {
   // called unconditionally on every render in the same order.
   const [savedFlash, setSavedFlash] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [previewSource, setPreviewSource] = useState<{ mediaId: string; title: string } | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<Element | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -618,14 +619,16 @@ export function ResultViewer() {
               </span>
               <div className="ref-source-row">
                 {refSourceNodes.map((r) => (
-                  <div
+                  <button
                     key={r.node.id}
-                    className="ref-source-chip"
+                    type="button"
+                    className="ref-source-chip ref-source-chip--clickable"
                     title={
                       r.variantIdx !== null
-                        ? `${r.node.data.title} — variant ${r.variantIdx + 1}`
-                        : r.node.data.title
+                        ? `${r.node.data.title} — variant ${r.variantIdx + 1} (click để xem)`
+                        : `${r.node.data.title} (click để xem)`
                     }
+                    onClick={() => setPreviewSource({ mediaId: r.mediaId, title: r.node.data.title })}
                   >
                     <img
                       className="ref-source-chip__img"
@@ -640,7 +643,7 @@ export function ResultViewer() {
                     <span className="ref-source-chip__id">
                       #{r.node.data.shortId}
                     </span>
-                  </div>
+                  </button>
                 ))}
               </div>
             </>
@@ -770,6 +773,31 @@ export function ResultViewer() {
         >
           ×
         </button>
+
+        {previewSource && (
+          <div
+            className="source-preview"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Preview ${previewSource.title}`}
+            onClick={() => setPreviewSource(null)}
+          >
+            <button
+              type="button"
+              className="source-preview__close"
+              onClick={() => setPreviewSource(null)}
+              aria-label="Close source preview"
+            >
+              ×
+            </button>
+            <img
+              className="source-preview__img"
+              src={mediaUrl(previewSource.mediaId)}
+              alt={previewSource.title}
+              onClick={(e) => e.stopPropagation()}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

@@ -304,6 +304,64 @@ def _frame_face_score(cv2, frame) -> int:
         return 0
 
 
+def _frame_sharpness(cv2, frame) -> float:
+    """Subject-weighted focus measure (variance of the Laplacian).
+
+    Motion-blurred / out-of-focus frames have low high-frequency energy and thus
+    a low Laplacian variance, so this lets us pick the crispest frame in each
+    segment instead of whatever frame lands on the stride. Like the sharpest-
+    frame picker in services/media.py, we weight the center/upper-body region so
+    a sharp wall doesn't beat a frame where the subject (and face) is crisp, and
+    penalize blown-out / crushed exposures. Returns 0.0 if OpenCV lacks the ops
+    (e.g. under the test's fake cv2)."""
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape[:2]
+
+        cx1, cx2 = int(w * 0.18), int(w * 0.82)
+        cy1, cy2 = int(h * 0.12), int(h * 0.88)
+        center = gray[cy1:cy2, cx1:cx2]
+        upper = gray[int(h * 0.12):int(h * 0.58), int(w * 0.22):int(w * 0.78)]
+
+        full_sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        center_sharpness = float(cv2.Laplacian(center, cv2.CV_64F).var()) if center.size else 0.0
+        upper_sharpness = float(cv2.Laplacian(upper, cv2.CV_64F).var()) if upper.size else 0.0
+
+        brightness = float(center.mean()) if center.size else float(gray.mean())
+        exposure_penalty = 0.55 if brightness < 35 or brightness > 235 else 1.0
+
+        return (
+            center_sharpness * 0.55
+            + upper_sharpness * 0.30
+            + full_sharpness * 0.15
+        ) * exposure_penalty
+    except Exception:
+        return 0.0
+
+
+def _write_jpeg(cv2, path: str, frame) -> None:
+    """Write a frame to JPEG at high quality so the reference stays crisp.
+
+    Applies a gentle unsharp mask first (matching services/media.py) to recover
+    soft video frames without altering layout. Falls back to plain writes when
+    OpenCV ops / the JPEG-quality flag are unavailable (keeps the test's 2-arg
+    fake `imwrite` working)."""
+    try:
+        blurred = cv2.GaussianBlur(frame, (0, 0), 1.0)
+        frame = cv2.addWeighted(frame, 1.35, blurred, -0.35, 0)
+    except Exception:
+        pass
+
+    quality_flag = getattr(cv2, "IMWRITE_JPEG_QUALITY", None)
+    if quality_flag is not None:
+        try:
+            cv2.imwrite(path, frame, [int(quality_flag), 95])
+            return
+        except TypeError:
+            pass
+    cv2.imwrite(path, frame)
+
+
 async def _upload_sample_reference_frame(
     frame_path: str,
     *,
@@ -426,7 +484,7 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
         "Treat every scene as the next connected motion beat of the same take, not as an independent reset. "
         "For each scene, you must provide:\n"
         "1. title: A concise scene title (in Vietnamese).\n"
-        "2. image_prompt: A highly detailed, descriptive, visual image generation prompt describing the starting frame of the scene in English. Include subject, lighting, colors, background, and environment.\n"
+        "2. image_prompt: A highly detailed, descriptive, visual image generation prompt describing the starting frame of the scene in English. Include subject, lighting, colors, background, and environment. ALSO describe the EXACT framing and pose seen in the frame: the shot size / camera distance (e.g. full-body, knees-up, medium), whether the legs and lower body are in frame, the body pose, stance, hand/arm position, body angle, and the facial expression. If the frame is a full-body or knees-up shot, the prompt MUST say full-body / knees-up and keep the legs and full outfit in frame — never describe it as a tight upper-body or face close-up, and never add a smile or change the pose unless the source frame shows it.\n"
         "3. video_prompt: A description of only the next motion beat, gesture transition, ending pose, and camera movement in English (e.g., 'she raises her right hand from shoulder height into a small wave, then lands in a stable front-facing pose'). Do not restart the scene, change identity, change location, or repeat the opening pose unless it is the first scene.\n"
         "4. narration: A Vietnamese voiceover narration text (max 2 sentences) that describes the storytelling or dialogue in this scene. Speak naturally in Vietnamese.\n\n"
         "Your output MUST be a valid JSON array of objects. Do not include any markdown formatting (like ```json), explanations, or text outside the JSON array."
@@ -447,9 +505,12 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
 
         temp_dir = tempfile.mkdtemp(prefix="flowboard_vid_")
         try:
+            # Grab the highest-resolution stream we can (up to 1080p) so the
+            # extracted reference frames are sharp. Audio is irrelevant for frame
+            # sampling, so prefer a video-only stream to avoid a needless mux.
             ydl_opts = {
                 'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
-                'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+                'format': 'bestvideo[height<=1080]/best[height<=1080]/bestvideo/best',
                 'quiet': True,
                 'no_warnings': True,
             }
@@ -464,44 +525,63 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             duration = total_frames / fps if fps > 0 else 0
 
-            # Extract a denser, evenly-spaced set of frames across the whole
-            # timeline. We keep ~12 candidates: the first 8 are still sent to
-            # Gemini for motion analysis (MAX_ATTACHMENTS budget), but the full
-            # ordered list is later mapped onto the returned scenes so each
-            # scene's clip can start from the REAL frame at that point in the
-            # source video (timeline-aligned), not just a single hero frame.
-            # `frac` (0..1) records each frame's position in the video so we can
-            # pick the frame nearest a given scene's normalized timestamp.
+            # Split the timeline into MAX_CANDIDATE_FRAMES even segments and, for
+            # each, keep the SHARPEST frame (highest Laplacian variance) instead
+            # of whatever frame lands on a fixed stride — fixed-stride sampling
+            # routinely lands on motion-blurred frames. A visible face wins ties
+            # so the chosen reference shows the subject clearly. The first 8
+            # winners go to Gemini for motion analysis (attachment budget); the
+            # full ordered list is later mapped onto the returned scenes so each
+            # clip can start from the REAL frame at that point in the source
+            # video (timeline-aligned). `frac` (0..1) records each frame's
+            # position so we can pick the frame nearest a scene's timestamp.
             MAX_CANDIDATE_FRAMES = 12
             if total_frames > 0:
-                step = max(1, total_frames // MAX_CANDIDATE_FRAMES)
+                # Bound decode cost on long/high-fps clips: scan at most
+                # ~READ_BUDGET frames spread evenly across the whole video, which
+                # still gives several candidates per segment to compare.
+                READ_BUDGET = 240
+                read_stride = max(1, total_frames // READ_BUDGET)
+                # best[bucket] = (sharpness, face_score, frame_copy, frac)
+                best: dict[int, tuple] = {}
                 frame_count = 0
-                saved_count = 0
-                while cap.isOpened() and saved_count < MAX_CANDIDATE_FRAMES:
+                while cap.isOpened():
                     ret, frame = cap.read()
                     if not ret:
                         break
-                    if frame_count % step == 0:
-                        frame_path = os.path.join(temp_dir, f"frame_{saved_count}.jpg")
-                        cv2.imwrite(frame_path, frame)
-                        # Only the first 8 frames go to Gemini (attachment cap);
-                        # the rest still serve as timeline anchors for scenes.
-                        if len(attachments) < 8:
-                            attachments.append(frame_path)
-                        shape = getattr(frame, "shape", None)
-                        height = int(shape[0]) if shape is not None and len(shape) >= 2 else 0
-                        width = int(shape[1]) if shape is not None and len(shape) >= 2 else 0
-                        sample_frame_candidates.append(
-                            {
-                                "path": frame_path,
-                                "width": width,
-                                "height": height,
-                                "face_score": _frame_face_score(cv2, frame),
-                                "frac": (frame_count / total_frames) if total_frames else 0.0,
-                            }
-                        )
-                        saved_count += 1
+                    if frame_count % read_stride == 0:
+                        frac = frame_count / total_frames
+                        bucket = min(MAX_CANDIDATE_FRAMES - 1, int(frac * MAX_CANDIDATE_FRAMES))
+                        sharpness = _frame_sharpness(cv2, frame)
+                        face_score = _frame_face_score(cv2, frame)
+                        # Prefer a visible face, then the crispest frame.
+                        rank = (1 if face_score > 0 else 0, sharpness)
+                        prev = best.get(bucket)
+                        if prev is None or rank > (1 if prev[1] > 0 else 0, prev[0]):
+                            frame_copy = frame.copy() if hasattr(frame, "copy") else frame
+                            best[bucket] = (sharpness, face_score, frame_copy, frac)
                     frame_count += 1
+
+                for saved_count, bucket in enumerate(sorted(best.keys())):
+                    sharpness, face_score, frame, frac = best[bucket]
+                    frame_path = os.path.join(temp_dir, f"frame_{saved_count}.jpg")
+                    _write_jpeg(cv2, frame_path, frame)
+                    # Only the first 8 frames go to Gemini (attachment cap);
+                    # the rest still serve as timeline anchors for scenes.
+                    if len(attachments) < 8:
+                        attachments.append(frame_path)
+                    shape = getattr(frame, "shape", None)
+                    height = int(shape[0]) if shape is not None and len(shape) >= 2 else 0
+                    width = int(shape[1]) if shape is not None and len(shape) >= 2 else 0
+                    sample_frame_candidates.append(
+                        {
+                            "path": frame_path,
+                            "width": width,
+                            "height": height,
+                            "face_score": face_score,
+                            "frac": frac,
+                        }
+                    )
             cap.release()
             # Analyze reference video with production/prompt-engineering structure,
             # then convert that analysis into the JSON scene format required by Flowboard.
@@ -790,7 +870,25 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                     s.flush()
                     spawned_nodes.append(frame_ref_node)
 
-                    scene_image_prompt = image_prompt
+                    # FRAME FIDELITY: the source frame is passed as a reference
+                    # image, but without this the model crops into a tight,
+                    # smiling upper-body portrait and drops the rest of the body.
+                    # Force it to reproduce the reference frame's exact shot:
+                    # same camera distance / crop, full-body framing when the
+                    # source is full-body (keep legs / lower body / full outfit
+                    # in frame), same body pose and hand/arm position, and the
+                    # same facial expression. Do NOT zoom in, do NOT add a smile.
+                    frame_fidelity_prefix = (
+                        "MATCH THE REFERENCE FRAME EXACTLY. Reproduce the same camera "
+                        "distance, shot size, and crop as the sample frame: if the frame "
+                        "is a full-body / knees-up shot, keep it full-body with the legs, "
+                        "lower body, and full outfit visible — do NOT zoom into a tight "
+                        "upper-body or face portrait. Keep the same body pose, stance, "
+                        "hand and arm position, body angle, and the same facial expression "
+                        "as the frame (do NOT add a smile, open mouth, or a different "
+                        "pose). Same framing, same composition, same energy. "
+                    )
+                    scene_image_prompt = f"{frame_fidelity_prefix}{image_prompt}"
                     if identity_prefix and identity_prefix not in scene_image_prompt:
                         scene_image_prompt = f"{identity_prefix}{scene_image_prompt}"
                     img_short_id = generate_unique_short_id(s, board_id)
