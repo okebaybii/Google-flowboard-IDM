@@ -402,29 +402,30 @@ async def run_pipeline(
         upstream_nodes = [node_by_id[u] for u in upstream_node_ids if u in node_by_id]
 
         if node.type in ("image", "Storyboard"):
-            # Check whether any upstream character node is present.
-            has_character_upstream = any(u.type == "character" for u in upstream_nodes)
-
-            ref_media_ids = []
+            # Sample frames (timeline frames from the source video) anchor the
+            # whole composition — outfit, body, pose, camera angle, lighting,
+            # background. We MUST keep them as references even when a Character
+            # is connected; otherwise Flow generates from the character face +
+            # text only, with no visual anchor, and the result drifts far from
+            # the sample (different clothes / body / angle / light). The
+            # original face these frames carry is replaced afterwards by
+            # apply_face_swap_to_node_media (post-generation face swap), so
+            # there is no lasting identity drift. Collect them separately so we
+            # can place them FIRST and let Flow treat them as the primary scene
+            # anchor, with character / other refs following for face/identity.
+            sample_frame_ids: list[str] = []
+            other_ref_ids: list[str] = []
             for u in upstream_nodes:
                 if u.type not in ("character", "image", "visual_asset", "Storyboard"):
                     continue
                 mid = (u.data or {}).get("mediaId")
                 if not isinstance(mid, str) or not mid:
                     continue
-                # When a character ref is present, skip visual_asset nodes that
-                # are timeline sample frames from the source video. Those frames
-                # contain the original video person's face — including them in
-                # ref_media_ids alongside a character ref confuses the model and
-                # causes face-identity drift in scenes after the first one.
-                if (
-                    has_character_upstream
-                    and u.type == "visual_asset"
-                    and (u.data or {}).get("sourceVideoFrame")
-                ):
-                    continue
-                ref_media_ids.append(mid)
-            ref_media_ids = [m for m in ref_media_ids if m]
+                if u.type == "visual_asset" and (u.data or {}).get("sourceVideoFrame"):
+                    sample_frame_ids.append(mid)
+                else:
+                    other_ref_ids.append(mid)
+            ref_media_ids = [m for m in (sample_frame_ids + other_ref_ids) if m]
             params = {
                 "prompt": prompt.strip(),
                 "project_id": project_id,
