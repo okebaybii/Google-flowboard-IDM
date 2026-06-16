@@ -388,6 +388,50 @@ async def test_gen_image_returns_media_entries_with_urls():
     assert out["media_entries"][0]["url"].startswith("https://flow-content.google/")
 
 
+@pytest.mark.asyncio
+async def test_edit_image_variant_count_fans_out_request_items():
+    """AI-face-transfer / refine routes through edit_image. Picking N
+    variants in the dialog must replicate the request item N times (distinct
+    seeds) so Flow returns N images — the regression was edit_image always
+    sending a single item and collapsing the user's choice to 1 result."""
+    c = RecordingClient()
+    c.api_response = _make_gen_image_response(["e1", "e2", "e3", "e4"])
+    sdk = FlowSDK(client=c)  # type: ignore[arg-type]
+    out = await sdk.edit_image(
+        prompt="swap face",
+        project_id="p",
+        source_media_id="base-1",
+        ref_media_ids=["face-1"],
+        paygate_tier="PAYGATE_TIER_ONE",
+        variant_count=4,
+    )
+    assert out["media_ids"] == ["e1", "e2", "e3", "e4"]
+
+    items = c.api_calls[0]["body"]["requests"]
+    assert len(items) == 4
+    # Distinct seeds so Flow doesn't dedupe identical items.
+    seeds = [it["seed"] for it in items]
+    assert len(set(seeds)) == 4
+    # Every item keeps BASE_IMAGE first + the face reference.
+    for it in items:
+        kinds = [im["imageInputType"] for im in it["imageInputs"]]
+        assert kinds[0] == "IMAGE_INPUT_TYPE_BASE_IMAGE"
+        assert "IMAGE_INPUT_TYPE_REFERENCE" in kinds
+
+
+@pytest.mark.asyncio
+async def test_edit_image_defaults_to_single_item():
+    c = RecordingClient()
+    c.api_response = _make_gen_image_response(["only"])
+    sdk = FlowSDK(client=c)  # type: ignore[arg-type]
+    out = await sdk.edit_image(
+        prompt="x", project_id="p", source_media_id="base",
+        paygate_tier="PAYGATE_TIER_ONE",
+    )
+    assert out["media_ids"] == ["only"]
+    assert len(c.api_calls[0]["body"]["requests"]) == 1
+
+
 # ── Video gen ───────────────────────────────────────────────────────────────
 
 

@@ -534,6 +534,10 @@ async def _handle_edit_image(params: dict) -> tuple[dict, Optional[str]]:
     image_model = params.get("image_model")
     if not isinstance(image_model, str) or not image_model.strip():
         image_model = None
+    raw_count = params.get("variant_count")
+    variant_count = 1
+    if isinstance(raw_count, int) and raw_count > 0:
+        variant_count = raw_count
 
     resp = await get_flow_sdk().edit_image(
         prompt=prompt.strip(),
@@ -543,6 +547,7 @@ async def _handle_edit_image(params: dict) -> tuple[dict, Optional[str]]:
         aspect_ratio=aspect,
         paygate_tier=tier,
         image_model=image_model,
+        variant_count=variant_count,
     )
     if resp.get("error"):
         return resp, str(resp["error"])[:200]

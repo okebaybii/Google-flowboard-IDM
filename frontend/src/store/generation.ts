@@ -406,6 +406,11 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
                 opts.paygateTier ?? get().paygateTier ?? "PAYGATE_TIER_ONE",
               image_model: useSettingsStore.getState().imageModel,
               ai_face_transfer: true,
+              // Honor the dialog's "Variants" picker here too. Face-transfer
+              // routes through edit_image, which used to ignore the count and
+              // always return 1 — so picking 4 silently produced a single
+              // image. The backend replicates the request item per variant.
+              variant_count: variantCount,
             },
           });
         } else {
