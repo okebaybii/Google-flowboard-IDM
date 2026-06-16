@@ -7,16 +7,24 @@ logger = logging.getLogger(__name__)
 # Cache models
 _app = None
 _swapper = None
+# Once we know the face-swap stack can't load, remember it so we log the reason
+# ONCE and then quietly skip on every subsequent generation instead of spamming
+# the same error on each request.
+_unavailable = False
+
 
 def get_face_swap_models():
     """Load FaceAnalysis and Inswapper ONNX models if insightface is installed."""
-    global _app, _swapper
+    global _app, _swapper, _unavailable
     if _app is not None and _swapper is not None:
         return _app, _swapper
-        
+    if _unavailable:
+        return None, None
+
     try:
         import onnxruntime  # noqa: F401
     except Exception as e:
+        _unavailable = True
         # Most common cause on Windows: onnxruntime's native DLL fails to load
         # because the Visual C++ Redistributable is missing, or the Python
         # version is too new for the installed onnxruntime wheel. Without this
@@ -41,6 +49,7 @@ def get_face_swap_models():
         # Path to inswapper model
         model_path = Path(os.path.expanduser("~/.insightface/models/inswapper_128.onnx"))
         if not model_path.exists():
+            _unavailable = True
             logger.error(
                 "Face swap DISABLED: inswapper_128.onnx not found at "
                 "~/.insightface/models/inswapper_128.onnx"
@@ -50,6 +59,7 @@ def get_face_swap_models():
         _swapper = insightface.model_zoo.get_model(str(model_path), download=False)
         return _app, _swapper
     except Exception as e:
+        _unavailable = True
         logger.error("Face swap DISABLED: InsightFace failed to initialize: %s", e)
         return None, None
 
