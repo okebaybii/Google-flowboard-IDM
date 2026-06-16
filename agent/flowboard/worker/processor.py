@@ -1161,7 +1161,7 @@ class WorkerController:
 
             if not err and node_id is not None and req_type in ("gen_image", "gen_video", "gen_video_omni", "edit_image", "upscale_video"):
                 try:
-                    if not params.get("ai_face_transfer"):
+                    if not params.get("ai_face_transfer") and not params.get("disable_face_swap"):
                         apply_face_swap_to_node_media(node_id, req_type, result, params)
                 except Exception as fs_err:
                     logger.error(f"Face swap post-processing failed: {fs_err}")

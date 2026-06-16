@@ -1935,20 +1935,33 @@ function StylePresetBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
 function StoryScriptBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
   const prompt = (data.prompt as string) || "";
   const sampleVideoUrl = (data.sampleVideoUrl as string) || "";
+  // Default ON (undefined → true) to preserve previous behaviour.
+  const faceSwap = data.faceSwap !== false;
   const [localPrompt, setLocalPrompt] = useState(prompt);
   const [localSampleVideoUrl, setLocalSampleVideoUrl] = useState(sampleVideoUrl);
+  const [localFaceSwap, setLocalFaceSwap] = useState(faceSwap);
   const [generating, setGenerating] = useState(data.status === "running");
 
   useEffect(() => {
     setLocalPrompt(prompt);
     setLocalSampleVideoUrl(sampleVideoUrl);
-  }, [prompt, sampleVideoUrl]);
+    setLocalFaceSwap(faceSwap);
+  }, [prompt, sampleVideoUrl, faceSwap]);
 
   const handleBlur = () => {
     useBoardStore.getState().updateNodeData(rfId, { prompt: localPrompt, sampleVideoUrl: localSampleVideoUrl });
     const dbId = parseInt(rfId, 10);
     if (!isNaN(dbId)) {
       void patchNode(dbId, { data: { prompt: localPrompt, sampleVideoUrl: localSampleVideoUrl } });
+    }
+  };
+
+  const handleToggleFaceSwap = (next: boolean) => {
+    setLocalFaceSwap(next);
+    useBoardStore.getState().updateNodeData(rfId, { faceSwap: next });
+    const dbId = parseInt(rfId, 10);
+    if (!isNaN(dbId)) {
+      void patchNode(dbId, { data: { faceSwap: next } });
     }
   };
 
@@ -1976,6 +1989,7 @@ function StoryScriptBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
           prompt: localPrompt,
           sampleVideoUrl: localSampleVideoUrl,
           projectId,
+          faceSwap: localFaceSwap,
         }),
       });
       
@@ -2034,6 +2048,29 @@ function StoryScriptBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
           fontFamily: "inherit"
         }}
       />
+      <label
+        className="nodrag"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          fontSize: 11,
+          color: "var(--text-dim)",
+          cursor: generating ? "default" : "pointer",
+          userSelect: "none",
+        }}
+        title="Khi BẬT: tự động ghép khuôn mặt Character vào ảnh/clip tạo ra. Khi TẮT: giữ nguyên mặt từ video mẫu."
+      >
+        <input
+          type="checkbox"
+          checked={localFaceSwap}
+          disabled={generating}
+          onChange={(e) => handleToggleFaceSwap(e.target.checked)}
+          style={{ cursor: generating ? "default" : "pointer" }}
+        />
+        Tự ghép mặt Character (face-swap)
+      </label>
       <button
         type="button"
         className="visual-asset__action"
