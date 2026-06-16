@@ -677,6 +677,10 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
         # Scene i sits at (i + 0.5) / N of the way through the video; pick the
         # extracted frame whose `frac` is closest. Upload each once; reuse the
         # hero upload when a scene maps to the same frame to save round-trips.
+        # IMPORTANT: every scene must end up with a REAL sample frame so it
+        # tracks the source. If a scene's nearest frame fails to upload, we fall
+        # back to the closest frame that DID upload (and finally the hero), so a
+        # scene is never left frameless just because one upload errored.
         n_scenes = max(len(scenes), 1)
         uploaded_by_path: dict[str, Optional[dict]] = {}
         if sample_reference is not None:
@@ -684,17 +688,29 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
         ordered = sorted(sample_frame_candidates, key=lambda f: f.get("frac", 0.0))
         for i in range(len(scenes)):
             target = (i + 0.5) / n_scenes
-            nearest = min(ordered, key=lambda f: abs(f.get("frac", 0.0) - target))
-            path = nearest["path"]
-            if path not in uploaded_by_path:
-                uploaded_by_path[path] = await _upload_sample_reference_frame(
-                    nearest["path"],
-                    project_id=body.projectId,
-                    story_node_id=node_id,
-                    width=nearest["width"],
-                    height=nearest["height"],
-                )
-            scene_frame_refs.append(uploaded_by_path[path])
+            # Try candidates in order of distance from the scene's timeline
+            # position; take the first one that uploads successfully.
+            by_distance = sorted(
+                ordered, key=lambda f: abs(f.get("frac", 0.0) - target)
+            )
+            scene_ref: Optional[dict] = None
+            for cand in by_distance:
+                path = cand["path"]
+                if path not in uploaded_by_path:
+                    uploaded_by_path[path] = await _upload_sample_reference_frame(
+                        cand["path"],
+                        project_id=body.projectId,
+                        story_node_id=node_id,
+                        width=cand["width"],
+                        height=cand["height"],
+                    )
+                if uploaded_by_path[path] is not None:
+                    scene_ref = uploaded_by_path[path]
+                    break
+            # Last resort: the hero/global reference if it uploaded.
+            if scene_ref is None:
+                scene_ref = sample_reference
+            scene_frame_refs.append(scene_ref)
 
     if temp_dir:
         shutil.rmtree(temp_dir, ignore_errors=True)
