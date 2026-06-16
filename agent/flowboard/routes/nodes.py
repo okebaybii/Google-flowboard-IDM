@@ -950,6 +950,41 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                     if asset and asset.node_id is None:
                         asset.node_id = frame_ref_node.id
                         s.add(asset)
+                elif use_source_frames:
+                    # Sample-video mode, but THIS scene has no usable frame
+                    # (upload failed / fewer frames than scenes). Still give the
+                    # scene its OWN AI-generated image anchor so we keep a strict
+                    # 1 image : 1 video alignment — otherwise the video below was
+                    # spawned with no image of its own and got wired onto a
+                    # shared base image, which is what made videos outnumber
+                    # images/samples and wired them messily.
+                    per_scene_prompt = image_prompt
+                    if identity_prefix and identity_prefix not in per_scene_prompt:
+                        per_scene_prompt = f"{identity_prefix}{per_scene_prompt}"
+                    img_short_id = generate_unique_short_id(s, board_id)
+                    img_node = Node(
+                        board_id=board_id,
+                        short_id=img_short_id,
+                        type="image",
+                        x=base_x + 640,
+                        y=base_y + i * 240,
+                        data={
+                            "title": scene.get("title", f"Scene {i+1} - Image"),
+                            "prompt": per_scene_prompt,
+                            "aspectRatio": "IMAGE_ASPECT_RATIO_PORTRAIT",
+                            "sequenceIndex": i,
+                        },
+                        status="idle",
+                    )
+                    s.add(img_node)
+                    s.flush()
+                    for ref_id in upstream_refs:
+                        s.add(Edge(board_id=board_id, source_id=ref_id,
+                                   target_id=img_node.id, kind="ref"))
+                    spawned_nodes.append(img_node)
+                    scene_start_node = img_node
+                    if base_img_node is None:
+                        base_img_node = img_node
                 elif i == 0:
                     # Classic path: AI-generated base image for the first scene.
                     first_image_prompt = image_prompt
