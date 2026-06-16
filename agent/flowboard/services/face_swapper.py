@@ -15,23 +15,42 @@ def get_face_swap_models():
         return _app, _swapper
         
     try:
+        import onnxruntime  # noqa: F401
+    except Exception as e:
+        # Most common cause on Windows: onnxruntime's native DLL fails to load
+        # because the Visual C++ Redistributable is missing, or the Python
+        # version is too new for the installed onnxruntime wheel. Without this
+        # the face swap SILENTLY does nothing — surface it loudly so the user
+        # knows the face shown is whatever Flow generated, not a real swap.
+        logger.error(
+            "Face swap DISABLED: onnxruntime failed to import (%s). "
+            "Install the Microsoft Visual C++ Redistributable (x64) and use a "
+            "Python version supported by onnxruntime (3.10-3.12). Until fixed, "
+            "Character faces are NOT swapped onto generated media.",
+            e,
+        )
+        return None, None
+
+    try:
         import insightface
-        import onnxruntime
-        
+
         # Initialize FaceAnalysis
         _app = insightface.app.FaceAnalysis(name="buffalo_l")
         _app.prepare(ctx_id=-1, det_size=(640, 640))  # -1 for CPU fallback
-        
+
         # Path to inswapper model
         model_path = Path(os.path.expanduser("~/.insightface/models/inswapper_128.onnx"))
         if not model_path.exists():
-            logger.warning("inswapper_128.onnx not found at ~/.insightface/models/inswapper_128.onnx")
+            logger.error(
+                "Face swap DISABLED: inswapper_128.onnx not found at "
+                "~/.insightface/models/inswapper_128.onnx"
+            )
             return None, None
-            
+
         _swapper = insightface.model_zoo.get_model(str(model_path), download=False)
         return _app, _swapper
     except Exception as e:
-        logger.warning(f"InsightFace is not fully configured for local face swapping: {e}")
+        logger.error("Face swap DISABLED: InsightFace failed to initialize: %s", e)
         return None, None
 
 
