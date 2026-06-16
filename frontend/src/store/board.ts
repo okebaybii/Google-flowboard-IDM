@@ -102,8 +102,6 @@ export interface FlowboardNodeData extends Record<string, unknown> {
   // multi-shot data is now ignored).
   storyboardGrid?: StoryboardGrid;
   sampleVideoUrl?: string;
-  // story_script: whether spawned scenes auto face-swap the Character (default true).
-  faceSwap?: boolean;
 }
 
 export type FlowNode = Node<FlowboardNodeData>;
@@ -308,7 +306,6 @@ export const useBoardStore = create<BoardState>((set, get) => ({
           storyboardGrid: n.data["storyboardGrid"] as StoryboardGrid | undefined,
           assemblyProgress: n.data["assemblyProgress"] as number | undefined,
           sampleVideoUrl: n.data["sampleVideoUrl"] as string | undefined,
-          faceSwap: n.data["faceSwap"] as boolean | undefined,
         },
       }));
 
@@ -458,7 +455,6 @@ export const useBoardStore = create<BoardState>((set, get) => ({
           retryFailedClips: n.data["retryFailedClips"] as boolean | undefined,
           assemblyProgress: n.data["assemblyProgress"] as number | undefined,
           sampleVideoUrl: n.data["sampleVideoUrl"] as string | undefined,
-          faceSwap: n.data["faceSwap"] as boolean | undefined,
         };
 
         const local = localById.get(id);

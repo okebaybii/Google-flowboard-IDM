@@ -396,10 +396,6 @@ async def run_pipeline(
             _stamp_node_status(nid, "error", error="no_project")
             continue
 
-        # Per-node opt-out of the automatic Character face-swap. Set on nodes
-        # spawned by a story-script run when the user turned face-swap off.
-        disable_face_swap = bool((node.data or {}).get("disableFaceSwap"))
-
         # Image/Storyboard: collect upstream character/image mediaIds.
         # Video: pick the first upstream image/Storyboard's mediaId as start.
         upstream_node_ids = incoming.get(nid, ())
@@ -436,8 +432,6 @@ async def run_pipeline(
             }
             if ref_media_ids:
                 params["ref_media_ids"] = ref_media_ids
-            if disable_face_swap:
-                params["disable_face_swap"] = True
             req_type = "gen_image"
         else:  # video
             images_found = []
@@ -457,8 +451,6 @@ async def run_pipeline(
             }
             if len(images_found) > 1:
                 params["end_media_id"] = images_found[-1]
-            if disable_face_swap:
-                params["disable_face_swap"] = True
             req_type = "gen_video"
 
         # Stamp running, dispatch.

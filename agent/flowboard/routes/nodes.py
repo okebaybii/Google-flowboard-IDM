@@ -200,9 +200,6 @@ class GenerateStoryRequest(BaseModel):
     prompt: Optional[str] = None
     sampleVideoUrl: Optional[str] = None
     projectId: Optional[str] = None
-    # When False, generated scene images/videos skip the automatic Character
-    # face-swap post-processing. Default True (preserve existing behaviour).
-    faceSwap: Optional[bool] = True
 
 
 import json
@@ -835,12 +832,6 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
             # previous clip's last frame.
             use_source_frames = bool(scene_frame_refs)
 
-            # Face-swap opt-out: when the user turned it off, stamp every spawned
-            # image/video node so pipeline_executor skips the post-gen Character
-            # face swap. Default True preserves the previous behaviour.
-            face_swap_enabled = body.faceSwap if body.faceSwap is not None else True
-            face_swap_patch = {} if face_swap_enabled else {"disableFaceSwap": True}
-
             prev_vid_node = None
             base_img_node = None
             for i, scene in enumerate(scenes):
@@ -937,7 +928,6 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                             "aspectRatio": scene_frame.get("aspect_ratio") or "IMAGE_ASPECT_RATIO_PORTRAIT",
                             "sourceVideoFrameMediaId": scene_frame["media_id"],
                             "sequenceIndex": i,
-                            **face_swap_patch,
                         },
                         status="idle",
                     )
@@ -979,8 +969,7 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                             # batch default (9:16 TikTok/Reels). Mismatched
                             # defaults made the batch flag every story image as
                             # aspect_mismatch and regenerate it needlessly.
-                            "aspectRatio": "IMAGE_ASPECT_RATIO_PORTRAIT",
-                            **face_swap_patch,
+                            "aspectRatio": "IMAGE_ASPECT_RATIO_PORTRAIT"
                         },
                         status="idle"
                     )
@@ -1032,7 +1021,6 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                         "continuityMode": "chain",
                         "requiresPreviousClip": i > 0,
                         "fallbackStartImage": i > 0,
-                        **face_swap_patch,
                     },
                     status="idle"
                 )
