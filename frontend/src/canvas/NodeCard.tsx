@@ -11,6 +11,7 @@ import {
   resolveStoryboardLayout,
 } from "../lib/storyboardPrompt";
 import { VideoAssemblyDialog } from "../components/VideoAssemblyDialog";
+import { STYLE_OPTIONS, DURATION_OPTIONS, ASPECT_OPTIONS, SCENE_COUNT_OPTIONS } from "../components/StoryDirectorDialog";
 
 const ICON: Record<string, string> = {
   character: "◎",
@@ -1122,8 +1123,53 @@ function VideoBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
     }
   };
 
+  const storyScriptNode = nodes.find((n) => 
+    edges.some((e) => e.target === rfId && e.source === n.id && n.data.type === "story_script")
+  );
+  
+  const scenes = storyScriptNode ? (storyScriptNode.data.shots as any[]) || [] : [];
+  const selectedSceneIndex = (data.selectedSceneIndex as number) || 0;
+  const videoModel = (data.videoModel as string) || "omni-flash";
+
   return (
     <div className="node-body node-body--video">
+      {storyScriptNode && scenes.length > 0 && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+          <select 
+            className="nodrag"
+            value={videoModel} 
+            onChange={(e) => {
+              useBoardStore.getState().updateNodeData(rfId, { videoModel: e.target.value });
+              const dbId = parseInt(rfId, 10);
+              if (!isNaN(dbId)) {
+                void patchNode(dbId, { data: { videoModel: e.target.value } });
+              }
+            }}
+            style={{ flex: 1, padding: "4px", fontSize: 11, background: "var(--panel)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4 }}
+          >
+            <option value="omni-flash">Omni Flash</option>
+            <option value="luma-dream">Luma Dream Machine</option>
+            <option value="runway-gen3">Runway Gen-3</option>
+          </select>
+          <select 
+            className="nodrag"
+            value={selectedSceneIndex} 
+            onChange={(e) => {
+              useBoardStore.getState().updateNodeData(rfId, { selectedSceneIndex: Number(e.target.value) });
+              const dbId = parseInt(rfId, 10);
+              if (!isNaN(dbId)) {
+                void patchNode(dbId, { data: { selectedSceneIndex: Number(e.target.value) } });
+              }
+            }}
+            style={{ flex: 1, padding: "4px", fontSize: 11, background: "var(--panel)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4 }}
+          >
+            {scenes.map((s, i) => (
+              <option key={s.id || i} value={i}>Shot {i + 1}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
       <div className={`video-grid video-grid--${tileCount}`}>
         {tiles}
       </div>
@@ -1141,17 +1187,18 @@ function VideoBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
         <span style={{ fontSize: 10, color: "var(--muted)" }} title="Lời thuyết minh AI">🗣️</span>
         <input
           type="text"
-          value={narration}
+          value={storyScriptNode && scenes[selectedSceneIndex] ? scenes[selectedSceneIndex].narration : narration}
           onChange={handleNarrationChange}
+          readOnly={!!storyScriptNode}
           placeholder="Thuyết minh AI cho clip..."
           style={{
             flex: 1,
             background: "none",
             border: "none",
+            color: storyScriptNode ? "var(--muted)" : "var(--text)",
             fontSize: 10,
-            color: "var(--text)",
             outline: "none",
-            padding: "2px 0",
+            padding: 0
           }}
         />
       </div>
@@ -1934,27 +1981,64 @@ function StylePresetBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
 
 function StoryScriptBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
   const prompt = (data.prompt as string) || "";
-  const sampleVideoUrl = (data.sampleVideoUrl as string) || "";
+  const shots = (data.shots as any[]) || [];
+  
   const [localPrompt, setLocalPrompt] = useState(prompt);
-  const [localSampleVideoUrl, setLocalSampleVideoUrl] = useState(sampleVideoUrl);
+  
+  const [style, setStyle] = useState((data.style as string) || "review");
+  const [shotDuration, setShotDuration] = useState((data.shotDuration as number) || 8);
+  const [aspectRatio, setAspectRatio] = useState((data.aspectRatio as string) || "portrait");
+  const [sceneCount, setSceneCount] = useState((data.sceneCount as number) || 3);
+
   const [generating, setGenerating] = useState(data.status === "running");
 
   useEffect(() => {
     setLocalPrompt(prompt);
-    setLocalSampleVideoUrl(sampleVideoUrl);
-  }, [prompt, sampleVideoUrl]);
+  }, [prompt]);
 
   const handleBlur = () => {
-    useBoardStore.getState().updateNodeData(rfId, { prompt: localPrompt, sampleVideoUrl: localSampleVideoUrl });
+    useBoardStore.getState().updateNodeData(rfId, { 
+      prompt: localPrompt, 
+      style,
+      shotDuration,
+      aspectRatio,
+      sceneCount
+    });
     const dbId = parseInt(rfId, 10);
     if (!isNaN(dbId)) {
-      void patchNode(dbId, { data: { prompt: localPrompt, sampleVideoUrl: localSampleVideoUrl } });
+      void patchNode(dbId, { data: { 
+        prompt: localPrompt, 
+        style,
+        shotDuration,
+        aspectRatio,
+        sceneCount
+      }});
+    }
+  };
+
+  const handleShotChange = (index: number, field: string, value: string) => {
+    const updatedShots = [...shots];
+    updatedShots[index] = { ...updatedShots[index], [field]: value };
+    useBoardStore.getState().updateNodeData(rfId, { shots: updatedShots });
+  };
+
+  const handleSaveShots = async () => {
+    const dbId = parseInt(rfId, 10);
+    if (!isNaN(dbId)) {
+      try {
+        await api(`/api/nodes/story-script/${dbId}/update-shots`, {
+          method: "POST",
+          body: JSON.stringify({ shots }),
+        });
+      } catch (err) {
+        console.error("Failed to save shots:", err);
+      }
     }
   };
 
   const handleGenerate = async () => {
-    if (!localPrompt.trim() && !localSampleVideoUrl.trim()) {
-      alert("Vui lòng nhập nội dung kịch bản hoặc link video mẫu.");
+    if (!localPrompt.trim()) {
+      alert("Vui lòng nhập nội dung kịch bản.");
       return;
     }
 
@@ -1963,27 +2047,26 @@ function StoryScriptBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
 
     try {
       const dbId = parseInt(rfId, 10);
-      let projectId: string | null = null;
-      if (localSampleVideoUrl.trim()) {
-        projectId = await useGenerationStore.getState().ensureProjectId();
-        if (!projectId) {
-          throw new Error("Không lấy được Flow project để upload frame tham chiếu từ video mẫu.");
-        }
-      }
-      await api(`/api/nodes/story-script/${dbId}/generate`, {
+      
+      const result = await api<{ ok: boolean; shots: any[] }>(`/api/nodes/story-script/${dbId}/generate`, {
         method: "POST",
         body: JSON.stringify({
           prompt: localPrompt,
-          sampleVideoUrl: localSampleVideoUrl,
-          projectId,
+          style,
+          shotDuration,
+          aspectRatio,
+          sceneCount
         }),
       });
       
-      // Update state to done
-      useBoardStore.getState().updateNodeData(rfId, { status: "done" });
-      
-      // Refresh the board to display the newly spawned nodes immediately!
-      await useBoardStore.getState().refreshBoardState();
+      if (result.ok && result.shots) {
+        useBoardStore.getState().updateNodeData(rfId, { 
+          status: "done", 
+          shots: result.shots 
+        });
+      } else {
+        useBoardStore.getState().updateNodeData(rfId, { status: "error" });
+      }
     } catch (err: any) {
       console.error("Story generation error:", err);
       alert(`Lỗi phân tách kịch bản: ${err.message || err}`);
@@ -1994,80 +2077,138 @@ function StoryScriptBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
   };
 
   return (
-    <div className="node-body story-script-body" style={{ display: "flex", flexDirection: "column", gap: 8, height: "100%" }}>
-      <input
-        type="text"
-        placeholder="Link video mẫu (tùy chọn)..."
-        value={localSampleVideoUrl}
-        onChange={(e) => setLocalSampleVideoUrl(e.target.value)}
-        onBlur={handleBlur}
-        disabled={generating}
-        style={{
-          width: "100%",
-          background: "var(--panel-high)",
-          border: "1px solid var(--border)",
-          borderRadius: 6,
-          color: "var(--text)",
-          padding: "6px 8px",
-          fontSize: 11,
-          boxSizing: "border-box"
-        }}
-      />
-      <textarea
-        className="node-card__textarea nodrag"
-        placeholder="Nhập cốt truyện hoặc ý tưởng phim (tùy chọn nếu có video mẫu)..."
-        value={localPrompt}
-        onChange={(e) => setLocalPrompt(e.target.value)}
-        onBlur={handleBlur}
-        disabled={generating}
-        style={{
-          flex: 1,
-          minHeight: 65,
-          background: "var(--panel-high)",
-          border: "1px solid var(--border)",
-          borderRadius: 6,
-          color: "var(--text)",
-          padding: "6px 8px",
-          fontSize: 11,
-          lineHeight: 1.4,
-          resize: "none",
-          fontFamily: "inherit"
-        }}
-      />
-      <button
-        type="button"
-        className="visual-asset__action"
-        onClick={(e) => {
-          e.stopPropagation();
-          handleGenerate();
-        }}
-        disabled={generating || (!localPrompt.trim() && !localSampleVideoUrl.trim())}
-        style={{
-          background: "linear-gradient(135deg, #7c5cff 0%, #a05cff 100%)",
-          color: "#fff",
-          border: "none",
-          fontWeight: 600,
-          padding: "6px 0",
-          borderRadius: 6,
-          cursor: "pointer",
-          fontSize: 11,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 6
-        }}
-      >
-        {generating ? (
-          <>
-            <div className="video-assembly__spinner" style={{ width: 12, height: 12, borderColor: "#fff", borderBottomColor: "transparent" }} />
-            Đang phân cảnh...
-          </>
-        ) : (
-          <>
-            <span>✦</span> Tự động phân cảnh
-          </>
+    <div className="node-body story-script-body" style={{ width: shots.length > 0 ? 480 : 320, padding: "10px 14px", display: "flex", flexDirection: "column", gap: "12px" }}>
+      <div className="story-director-content" style={{ padding: 0 }}>
+        <textarea
+          className="story-director-prompt nodrag"
+          placeholder="Nhập kịch bản / ý tưởng phim..."
+          value={localPrompt}
+          onChange={(e) => setLocalPrompt(e.target.value)}
+          onBlur={handleBlur}
+          disabled={generating}
+          rows={3}
+        />
+
+        <div className="story-director-config">
+          <label className="story-director-config__item nodrag">
+            <span className="story-director-config__label">PHONG CÁCH</span>
+            <select
+              className="story-director-config__select"
+              value={style}
+              onChange={(e) => { setStyle(e.target.value); handleBlur(); }}
+              disabled={generating}
+            >
+              {STYLE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="story-director-config__item nodrag">
+            <span className="story-director-config__label">THỜI LƯỢNG/SHOT</span>
+            <select
+              className="story-director-config__select"
+              value={shotDuration}
+              onChange={(e) => { setShotDuration(Number(e.target.value)); handleBlur(); }}
+              disabled={generating}
+            >
+              {DURATION_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="story-director-config__item nodrag">
+            <span className="story-director-config__label">TỶ LỆ VIDEO</span>
+            <select
+              className="story-director-config__select"
+              value={aspectRatio}
+              onChange={(e) => { setAspectRatio(e.target.value); handleBlur(); }}
+              disabled={generating}
+            >
+              {ASPECT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="story-director-config__item nodrag">
+            <span className="story-director-config__label">SỐ PHÂN CẢNH</span>
+            <select
+              className="story-director-config__select"
+              value={sceneCount}
+              onChange={(e) => { setSceneCount(Number(e.target.value)); handleBlur(); }}
+              disabled={generating}
+            >
+              {SCENE_COUNT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <button
+          type="button"
+          className="story-director-generate-btn nodrag"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleGenerate();
+          }}
+          disabled={generating || !localPrompt.trim()}
+        >
+          {generating ? (
+            <>
+              <span className="story-director-spinner" />
+              <span>Đang phân tích kịch bản...</span>
+            </>
+          ) : (
+            <>
+              <span style={{ fontSize: 14 }}>✦</span>
+              <span>Tạo Kịch Bản Phim</span>
+            </>
+          )}
+        </button>
+
+        {shots.length > 0 && (
+          <div className="story-director-shots" style={{ borderTop: "none", paddingTop: 0, marginTop: 16 }}>
+            {shots.map((shot, i) => (
+              <div key={shot.id} className="shot-card nodrag" style={{ cursor: "text" }}>
+                <div className="shot-card__header">
+                  <span className="shot-card__title">PHÂN CẢNH {i + 1}</span>
+                  <span className="shot-card__duration">{shot.duration}s</span>
+                </div>
+
+                <textarea
+                  className="shot-card__narration nodrag"
+                  value={shot.narration}
+                  onChange={(e) => handleShotChange(i, "narration", e.target.value)}
+                  onBlur={handleSaveShots}
+                  placeholder="Lời thoại / voiceover (tiếng Việt)..."
+                  rows={2}
+                  style={{ pointerEvents: "auto" }}
+                />
+
+                <textarea
+                  className="shot-card__image-prompt nodrag"
+                  value={shot.image_prompt}
+                  onChange={(e) => handleShotChange(i, "image_prompt", e.target.value)}
+                  onBlur={handleSaveShots}
+                  placeholder="Image prompt (English)..."
+                  rows={2}
+                  style={{ pointerEvents: "auto" }}
+                />
+
+                <textarea
+                  className="shot-card__camera nodrag"
+                  value={shot.camera}
+                  onChange={(e) => handleShotChange(i, "camera", e.target.value)}
+                  onBlur={handleSaveShots}
+                  placeholder="Camera direction (English)..."
+                  rows={1}
+                  style={{ pointerEvents: "auto" }}
+                />
+              </div>
+            ))}
+          </div>
         )}
-      </button>
+      </div>
     </div>
   );
 }
@@ -2088,6 +2229,30 @@ export function NodeCard(props: NodeProps<FlowNode>) {
   function handleGenerate(e: React.MouseEvent) {
     e.stopPropagation();
     if (llmBusy) return; // guard: backend still composing for this node
+
+    // BYPASS DIALOG IF STORY SCRIPT CONNECTED:
+    if (data.type === "video") {
+      const { nodes, edges } = useBoardStore.getState();
+      const storyScriptNode = nodes.find((n) => 
+        edges.some((edge) => edge.target === props.id && edge.source === n.id && n.data.type === "story_script")
+      );
+      if (storyScriptNode) {
+        const scenes = (storyScriptNode.data.shots as any[]) || [];
+        const selectedSceneIndex = (data.selectedSceneIndex as number) || 0;
+        if (scenes[selectedSceneIndex]) {
+          const shot = scenes[selectedSceneIndex];
+          const prompt = `${shot.image_prompt}\nCamera: ${shot.camera}`;
+          useGenerationStore.getState().dispatchGeneration(props.id, {
+            prompt,
+            kind: "video",
+            narration: shot.narration,
+            // also we can pass aspect ratio from story_script if we want, but letting backend use default is fine
+          });
+          return;
+        }
+      }
+    }
+
     useGenerationStore.getState().openGenerationDialog(props.id, data.prompt ?? "");
   }
 
@@ -2129,8 +2294,10 @@ export function NodeCard(props: NodeProps<FlowNode>) {
   return (
     <div
       className={`node-card${isNote ? " node-card--note" : ""}${
-        props.selected ? " node-card--selected" : ""
-      }${llmBusy ? " node-card--llm-busy" : ""}`}
+        data.type === "story_script" ? " node-card--story-script" : ""
+      }${props.selected ? " node-card--selected" : ""}${
+        llmBusy ? " node-card--llm-busy" : ""
+      }`}
     >
       <StatusStrip status={data.status} />
       <Handle type="target" position={Position.Left} className="node-handle" />

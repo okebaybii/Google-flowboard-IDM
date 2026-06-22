@@ -789,8 +789,8 @@ def test_extract_video_workflows_returns_pairs():
         }
     }
     assert extract_video_workflows(resp) == [
-        {"name": "wf-1", "primary_media_id": "mid-1"},
-        {"name": "wf-2", "primary_media_id": "mid-2"},
+        {"name": "wf-1", "primary_media_id": "mid-1", "project_id": None},
+        {"name": "wf-2", "primary_media_id": "mid-2", "project_id": None},
     ]
 
 
@@ -818,7 +818,7 @@ async def test_gen_video_surfaces_workflows_on_low_priority_response():
         paygate_tier="PAYGATE_TIER_TWO", video_quality="lite_relaxed",
     )
     assert out["operation_names"] == ["wf-uuid"]
-    assert out["workflows"] == [{"name": "wf-uuid", "primary_media_id": "primary-vid-1"}]
+    assert out["workflows"] == [{"name": "wf-uuid", "primary_media_id": "primary-vid-1", "project_id": None, "paygate_tier": "PAYGATE_TIER_TWO"}]
     # Old "no_operations_in_response" path must NOT trigger on workflow shape.
     assert "error" not in out
 

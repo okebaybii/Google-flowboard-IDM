@@ -85,6 +85,7 @@ interface GenerationState {
       // prompt — required for batch auto-prompt to keep poses distinct
       // across the 4 generated images.
       prompts?: string[];
+      narration?: string;
     },
   ): Promise<void>;
 
@@ -136,7 +137,17 @@ function collectUpstreamRefsByType(targetRfId: string): {
   const face: string[] = [];
   for (const e of edges) {
     if (e.target !== targetRfId) continue;
-    const src = nodes.find((n) => n.id === e.source);
+    let src = nodes.find((n) => n.id === e.source);
+    if (!src) continue;
+
+    // Trace through story_script to find actual ingredients upstream
+    if (src.data.type === "story_script") {
+      const scriptEdge = edges.find((se) => se.target === src?.id && REF_SOURCE_TYPES.has(nodes.find(n => n.id === se.source)?.data.type || ""));
+      if (scriptEdge) {
+        src = nodes.find((n) => n.id === scriptEdge.source);
+      }
+    }
+
     if (!src || !REF_SOURCE_TYPES.has(src.data.type)) continue;
 
     const variants = Array.isArray(src.data.mediaIds) ? src.data.mediaIds : [];
@@ -229,6 +240,7 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
     endMediaIds?: string[];
     variantCount?: number;
     prompts?: string[];
+    narration?: string;
   }) {
     const projectId = await get().ensureProjectId();
     if (projectId === null) return;
@@ -336,6 +348,7 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
                 opts.aspectRatio ?? "VIDEO_ASPECT_RATIO_PORTRAIT",
               paygate_tier:
                 opts.paygateTier ?? get().paygateTier ?? "PAYGATE_TIER_ONE",
+              narration: opts.narration,
             },
           });
         } else {

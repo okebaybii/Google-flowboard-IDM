@@ -200,6 +200,19 @@ class GenerateStoryRequest(BaseModel):
     prompt: Optional[str] = None
     sampleVideoUrl: Optional[str] = None
     projectId: Optional[str] = None
+    # AI Director Panel fields
+    style: Optional[str] = None  # "review", "entertainment", "cinematic", "dance", "education"
+    shotDuration: Optional[int] = Field(default=8, ge=3, le=30)  # seconds per shot
+    aspectRatio: Optional[str] = Field(default="portrait")  # "portrait" | "landscape" | "square"
+    sceneCount: Optional[int] = Field(default=3, ge=1, le=10)  # number of scenes
+
+
+class UpdateShotsRequest(BaseModel):
+    shots: list[dict]
+
+
+class CreateVideoRequest(BaseModel):
+    projectId: Optional[str] = None
 
 
 import json
@@ -426,7 +439,11 @@ async def _upload_sample_reference_frame(
 
 @router.post("/story-script/{node_id}/generate")
 async def generate_story_script(node_id: int, body: GenerateStoryRequest):
-    """Segment a script/concept into multi-scene visual storyboard assets in database."""
+    """Phase 1: AI analyzes script → returns editable shots (saved in node.data.shots).
+
+    Does NOT spawn image/video nodes. User reviews/edits shots first,
+    then calls /story-script/{node_id}/create-video to spawn nodes.
+    """
     with get_session() as s:
         node = s.get(Node, node_id)
         if not node:
@@ -449,6 +466,12 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
             else:
                 raise HTTPException(400, "Please enter a story prompt or sample video link.")
 
+        # Director Panel params
+        style = body.style or node_data.get("style", "cinematic")
+        shot_duration = body.shotDuration or node_data.get("shotDuration", 8)
+        aspect_ratio = body.aspectRatio or node_data.get("aspectRatio", "portrait")
+        scene_count = body.sceneCount or node_data.get("sceneCount", 3)
+
         # Get LLM provider
         saved_providers = secrets.read_active_providers()
         provider_name = saved_providers.get("auto_prompt") or saved_providers.get("planner") or "gemini"
@@ -457,7 +480,7 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
         if provider is None or not await provider.is_available():
             raise HTTPException(503, f"Configured LLM provider '{provider_name}' is not available. Please verify Settings.")
 
-        # Gather upstream reference text to enforce character/style consistency
+        # Gather upstream reference text
         upstream_prompts = []
         incoming_edges = s.exec(select(Edge).where(Edge.target_id == node_id)).all()
         for e in incoming_edges:
@@ -477,26 +500,73 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                 "You MUST strictly incorporate and preserve these exact character descriptions, clothing, and visual styles in ALL your generated `image_prompt`s. Do not invent new character appearances.\n\n"
             )
 
-    # Call the LLM provider
+    # Style-specific instructions
+    style_instructions = {
+        "review": (
+            "Phong cách: Review / Quảng cáo sản phẩm. Tập trung vào sản phẩm, cận cảnh chi tiết, "
+            "góc quay chuyên nghiệp, ánh sáng studio. Narration mang tính đánh giá, so sánh, giới thiệu tính năng."
+        ),
+        "entertainment": (
+            "Phong cách: Giải trí / Vlog. Tự nhiên, năng động, biểu cảm phong phú, "
+            "góc quay linh hoạt. Narration vui vẻ, gần gũi, dễ đồng cảm."
+        ),
+        "cinematic": (
+            "Phong cách: Cinematic / Phim ngắn. Ánh sáng điện ảnh, composition chuyên nghiệp, "
+            "depth of field, color grading ấn tượng. Narration giàu cảm xúc, kịch tính."
+        ),
+        "dance": (
+            "Phong cách: Dance / Trend. Nhịp điệu nhanh, chuyển động mượt, "
+            "góc quay dynamic. Narration ngắn gọn, theo beat nhạc."
+        ),
+        "education": (
+            "Phong cách: Giáo dục / Hướng dẫn. Rõ ràng, có cấu trúc, "
+            "cận cảnh step-by-step. Narration giải thích dễ hiểu, tuần tự."
+        ),
+    }
+    style_hint = style_instructions.get(style, style_instructions["cinematic"])
+
+    aspect_map = {
+        "portrait": "9:16 (dọc, TikTok/Reels)",
+        "landscape": "16:9 (ngang, YouTube)",
+        "square": "1:1 (vuông, Instagram)",
+    }
+    aspect_hint = aspect_map.get(aspect_ratio, aspect_map["portrait"])
+
+    # Build the AI prompt — shots output format
     system_prompt = (
-        "You are a master cinematic filmmaker and AI video story writer. "
-        "Analyze the provided short story or script concept and break it down into one continuous, highly descriptive, visual, multi-scene storyboard sequence (between 3 to 6 scenes depending on complexity). "
-        "Treat every scene as the next connected motion beat of the same take, not as an independent reset. "
-        "For each scene, you must provide:\n"
-        "1. title: A concise scene title (in Vietnamese).\n"
-        "2. image_prompt: A highly detailed, descriptive, visual image generation prompt describing the starting frame of the scene in English. Include subject, lighting, colors, background, and environment. ALSO describe the EXACT framing and pose seen in the frame: the shot size / camera distance (e.g. full-body, knees-up, medium), whether the legs and lower body are in frame, the body pose, stance, hand/arm position, body angle, and the facial expression. If the frame is a full-body or knees-up shot, the prompt MUST say full-body / knees-up and keep the legs and full outfit in frame — never describe it as a tight upper-body or face close-up, and never add a smile or change the pose unless the source frame shows it.\n"
-        "   BODY FIDELITY — CRITICAL: Look carefully at the subject's BODY in the frame and describe it explicitly so the generated body matches the source, because the image model rebuilds the body from your words. State the build / body type (e.g. slim, slim-thick, curvy, hourglass, athletic, petite, full-figured), the actual proportions you see (waist, hips, leg length, bust as appropriate), the height impression, the skin tone, and how much skin / figure the outfit reveals (e.g. bare shoulders, midriff, cleavage, bare legs). If the source figure is slim and sexy, say slim and sexy; if it is curvy, say curvy — REPRODUCE THE SAME BODY, do not slim it down, bulk it up, cover it up, or make it more modest than the source. Keep these body descriptors consistent across every scene so the same person is recognizable.\n"
-        "3. video_prompt: A description of only the next motion beat, gesture transition, ending pose, and camera movement in English (e.g., 'she raises her right hand from shoulder height into a small wave, then lands in a stable front-facing pose'). Do not restart the scene, change identity, change location, or repeat the opening pose unless it is the first scene.\n"
-        "4. narration: A Vietnamese voiceover narration text (max 2 sentences) that describes the storytelling or dialogue in this scene. Speak naturally in Vietnamese.\n\n"
-        "ATTRACTIVE / ALLURE STYLING — CONDITIONAL: When the main subject is a WOMAN and the scene is a casual / fashion / lifestyle / dance / beauty / social-media context, write each `image_prompt` so the figure looks striking, attractive and gợi cảm (sexy) — MORE flattering than a plain snapshot, while staying tasteful and platform-safe (no nudity, no explicit or vulgar framing). In that case the `image_prompt` MUST: keep the SAME revealing / fitted outfit from the source frame (e.g. crop top, off-shoulder top, denim shorts, fitted dress) — never cover it up or swap it for modest clothing; keep full-body or knees-up framing so the whole figure and legs read; and add figure-flattering description: well-proportioned hourglass / slim-curvy body, defined waist, long legs, gentle S-curve posture, weight on one hip, graceful confident posing, smooth flattering skin, and warm glamour lighting that sculpts the body. Do NOT apply this for male subjects, children, product-only shots, or formal / corporate / professional contexts — keep those neutral and natural. FIDELITY OVERRIDES ALLURE: when the scene is based on a sample video frame, faithfully matching that frame ALWAYS wins — never change the outfit, body shape/proportions, pose, scene, lighting, or framing to make it sexier; describe exactly what the frame shows and limit any enhancement to lighting quality and graceful posing within the same pose.\n\n"
-        "Your output MUST be a valid JSON array of objects. Do not include any markdown formatting (like ```json), explanations, or text outside the JSON array."
+        "Bạn là một đạo diễn phim chuyên nghiệp và chuyên gia viết prompt AI. "
+        "Phân tích kịch bản/ý tưởng được cung cấp và chia thành chuỗi phân cảnh (shots) liên tục.\n\n"
+        f"CẤU HÌNH ĐẠO DIỄN:\n"
+        f"- {style_hint}\n"
+        f"- Thời lượng mỗi shot: {shot_duration} giây\n"
+        f"- Tỷ lệ video: {aspect_hint}\n"
+        f"- Số phân cảnh yêu cầu: {scene_count} cảnh\n\n"
+        "Cho mỗi phân cảnh, bạn PHẢI cung cấp:\n"
+        "1. title: Tiêu đề phân cảnh ngắn gọn bằng tiếng Việt\n"
+        "2. narration: Lời thoại/voiceover bằng tiếng Việt (tối đa 2-3 câu). "
+        "Viết tự nhiên, phù hợp phong cách. Đây là text sẽ được đọc bằng giọng AI.\n"
+        "3. image_prompt: Prompt mô tả chi tiết khung hình đầu tiên của cảnh bằng tiếng Anh. "
+        "Bao gồm: subject, lighting, colors, background, environment, framing (full-body, medium, close-up), "
+        "pose, facial expression, outfit. Phải rất chi tiết để AI tạo hình ảnh chính xác.\n"
+        "4. camera: Mô tả kỹ thuật camera và chuyển động bằng tiếng Anh. "
+        "Ví dụ: 'Camera: Slow dolly in from medium shot to close-up. Shallow depth of field. "
+        "Warm cinematic lighting from the left.'\n\n"
+        "QUAN TRỌNG:\n"
+        "- Mỗi cảnh phải kết nối liên tục với cảnh trước (không reset identity/location)\n"
+        "- image_prompt phải bằng tiếng ANH, rất chi tiết\n"
+        "- narration phải bằng tiếng VIỆT, tự nhiên\n"
+        "- camera phải bằng tiếng ANH\n"
+        "- title phải bằng tiếng VIỆT\n\n"
+        "CỰC KỲ QUAN TRỌNG VỀ JSON: Output PHẢI là một mảng JSON (JSON array) hợp lệ. "
+        "KHÔNG BAO GIỜ dùng dấu ngoặc kép (\") bên trong nội dung của các chuỗi (string) vì nó sẽ làm hỏng JSON. "
+        "Nếu cần trích dẫn, hãy dùng dấu nháy đơn ('). Không markdown, không giải thích ngoài JSON."
     )
 
-    full_prompt = f"{system_prompt}\n\n{reference_context}STORY SCRIPT CONCEPT:\n{prompt_text}\n\nJSON OUTPUT:"
+    full_prompt = f"{system_prompt}\n\n{reference_context}KỊCH BẢN:\n{prompt_text}\n\nJSON OUTPUT:"
 
     attachments = []
     sample_frame_candidates = []
-    sample_video_url = body.sampleVideoUrl or node.data.get("sampleVideoUrl")
+    sample_video_url = body.sampleVideoUrl or (node.data or {}).get("sampleVideoUrl")
     temp_dir = None
 
     if sample_video_url and str(sample_video_url).strip():
@@ -507,9 +577,6 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
 
         temp_dir = tempfile.mkdtemp(prefix="flowboard_vid_")
         try:
-            # Grab the highest-resolution stream we can (up to 1080p) so the
-            # extracted reference frames are sharp. Audio is irrelevant for frame
-            # sampling, so prefer a video-only stream to avoid a needless mux.
             ydl_opts = {
                 'outtmpl': os.path.join(temp_dir, 'video.%(ext)s'),
                 'format': 'bestvideo[height<=1080]/best[height<=1080]/bestvideo/best',
@@ -521,30 +588,14 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                 ext = info.get('ext', 'mp4')
                 vid_path = os.path.join(temp_dir, f'video.{ext}')
 
-            # Extract frames
             cap = cv2.VideoCapture(vid_path)
             fps = cap.get(cv2.CAP_PROP_FPS)
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            duration = total_frames / fps if fps > 0 else 0
 
-            # Split the timeline into MAX_CANDIDATE_FRAMES even segments and, for
-            # each, keep the SHARPEST frame (highest Laplacian variance) instead
-            # of whatever frame lands on a fixed stride — fixed-stride sampling
-            # routinely lands on motion-blurred frames. A visible face wins ties
-            # so the chosen reference shows the subject clearly. The first 8
-            # winners go to Gemini for motion analysis (attachment budget); the
-            # full ordered list is later mapped onto the returned scenes so each
-            # clip can start from the REAL frame at that point in the source
-            # video (timeline-aligned). `frac` (0..1) records each frame's
-            # position so we can pick the frame nearest a scene's timestamp.
             MAX_CANDIDATE_FRAMES = 12
             if total_frames > 0:
-                # Bound decode cost on long/high-fps clips: scan at most
-                # ~READ_BUDGET frames spread evenly across the whole video, which
-                # still gives several candidates per segment to compare.
                 READ_BUDGET = 240
                 read_stride = max(1, total_frames // READ_BUDGET)
-                # best[bucket] = (sharpness, face_score, frame_copy, frac)
                 best: dict[int, tuple] = {}
                 frame_count = 0
                 while cap.isOpened():
@@ -556,7 +607,6 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                         bucket = min(MAX_CANDIDATE_FRAMES - 1, int(frac * MAX_CANDIDATE_FRAMES))
                         sharpness = _frame_sharpness(cv2, frame)
                         face_score = _frame_face_score(cv2, frame)
-                        # Prefer a visible face, then the crispest frame.
                         rank = (1 if face_score > 0 else 0, sharpness)
                         prev = best.get(bucket)
                         if prev is None or rank > (1 if prev[1] > 0 else 0, prev[0]):
@@ -566,75 +616,74 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
 
                 for saved_count, bucket in enumerate(sorted(best.keys())):
                     sharpness, face_score, frame, frac = best[bucket]
-                    frame_path = os.path.join(temp_dir, f"frame_{saved_count}.jpg")
+                    import os as _os
+                    frame_path = _os.path.join(temp_dir, f"frame_{saved_count}.jpg")
                     _write_jpeg(cv2, frame_path, frame)
-                    # Only the first 8 frames go to Gemini (attachment cap);
-                    # the rest still serve as timeline anchors for scenes.
                     if len(attachments) < 8:
                         attachments.append(frame_path)
                     shape = getattr(frame, "shape", None)
                     height = int(shape[0]) if shape is not None and len(shape) >= 2 else 0
                     width = int(shape[1]) if shape is not None and len(shape) >= 2 else 0
-                    sample_frame_candidates.append(
-                        {
-                            "path": frame_path,
-                            "width": width,
-                            "height": height,
-                            "face_score": face_score,
-                            "frac": frac,
-                        }
-                    )
+                    sample_frame_candidates.append({
+                        "path": frame_path,
+                        "width": width,
+                        "height": height,
+                        "face_score": face_score,
+                        "frac": frac,
+                    })
             cap.release()
-            # Analyze reference video with production/prompt-engineering structure,
-            # then convert that analysis into the JSON scene format required by Flowboard.
+
             video_analysis_instruction = (
-                "HÃ£y Ä‘Ã³ng vai má»™t chuyÃªn gia sáº£n xuáº¥t video vÃ  báº­c tháº§y viáº¿t prompt AI "
-                "(dÃ nh cho Midjourney, Runway, hoáº·c Sora). Dá»±a vÃ o video tÃ´i cung cáº¥p, "
-                "hÃ£y phÃ¢n tÃ­ch chi tiáº¿t tá»«ng khung hÃ¬nh vÃ  táº¡o prompt tiáº¿ng Anh Ä‘á»ƒ AI táº¡o "
-                "sáº£n pháº©m tÆ°Æ¡ng tá»±.\n\n"
-                "TrÆ°á»›c khi viáº¿t prompt cho tá»«ng scene, bÃ³c tÃ¡ch video theo cáº¥u trÃºc sau:\n"
-                "- Chá»§ thá»ƒ chÃ­nh: mÃ´ táº£ chi tiáº¿t ngoáº¡i hÃ¬nh, trang phá»¥c, Ä‘áº·c Ä‘iá»ƒm ná»•i báº­t.\n"
-                "- HÃ nh Ä‘á»™ng & Biá»ƒu cáº£m: tá»‘c Ä‘á»™ di chuyá»ƒn, ngÃ´n ngá»¯ cÆ¡ thá»ƒ.\n"
-                "- Bá»‘i cáº£nh xung quanh: khÃ´ng gian, Ä‘á»“ váº­t phá»¥ trá»£, Ä‘á»™ sÃ¢u trÆ°á»ng áº£nh.\n"
-                "- Ká»¹ thuáº­t quay: cá»¡ cáº£nh (Wide shot, Close-up, Medium shot), gÃ³c mÃ¡y "
-                "(Low angle, High angle), chuyá»ƒn Ä‘á»™ng camera (Pan, Tilt, Tracking, Slow motion).\n"
-                "- Ãnh sÃ¡ng & MÃ u sáº¯c: loáº¡i Ã¡nh sÃ¡ng (Cinematic lighting, Natural light, Neon) "
-                "vÃ  báº£ng mÃ u chá»§ Ä‘áº¡o.\n"
-                "- Cháº¥t lÆ°á»£ng & Phong cÃ¡ch: 8k, photorealistic, 35mm lens, highly detailed.\n\n"
-                "Sau khi phÃ¢n tÃ­ch, tá»•ng há»£p thÃ nh prompt tiáº¿ng Anh liÃªn tá»¥c, ngÄƒn cÃ¡ch báº±ng "
-                "dáº¥u pháº©y, tá»‘i Æ°u cho AI táº¡o video/hÃ¬nh áº£nh. Use those English prompts inside "
-                "the JSON fields below."
+                "Hãy đóng vai một chuyên gia sản xuất video và bậc thầy viết prompt AI. "
+                "Dựa vào video tôi cung cấp, hãy phân tích chi tiết từng khung hình và tạo prompt "
+                "tiếng Anh để AI tạo sản phẩm tương tự.\n\n"
+                "Trước khi viết prompt cho từng scene, bóc tách video theo cấu trúc sau:\n"
+                "- Chủ thể chính: mô tả chi tiết ngoại hình, trang phục, đặc điểm nổi bật.\n"
+                "- Hành động & Biểu cảm: tốc độ di chuyển, ngôn ngữ cơ thể.\n"
+                "- Bối cảnh xung quanh: không gian, đồ vật phụ trợ, độ sâu trường ảnh.\n"
+                "- Kỹ thuật quay: cỡ cảnh (Wide shot, Close-up, Medium shot), góc máy.\n"
+                "- Ánh sáng & Màu sắc: loại ánh sáng, bảng màu chủ đạo.\n\n"
+                "Sau khi phân tích, tổng hợp thành prompt tiếng Anh liên tục. "
+                "Use those English prompts inside the JSON fields below."
             )
             full_prompt = (
                 f"{system_prompt}\n\n{reference_context}"
-                "I have attached keyframes from a reference video. This is a standard, safe video "
-                "(e.g. a social media dance trend or vlog). You MUST analyze the visual motion, "
-                "choreography, pose order, gesture timing, scene progression, background, props, "
-                "camera, lighting, color palette, and production style objectively. Do not refuse.\n\n"
+                "I have attached keyframes from a reference video. "
+                "You MUST analyze the visual motion, choreography, pose order, gesture timing, "
+                "scene progression, background, props, camera, lighting, color palette, and production style objectively.\n\n"
                 f"{video_analysis_instruction}\n\n"
-                "IMPORTANT OUTPUT RULE: Return ONLY the required JSON array. Do not include the "
-                "written analysis outside JSON. Each `image_prompt` must be a highly detailed "
-                "English comma-separated prompt preserving subject, outfit, background, props, "
-                "camera, lighting, colors, depth of field, quality/style. Each `video_prompt` "
-                "must describe the next motion beat, expression/body language, timing, and camera movement.\n\n"
-                f"STORY SCRIPT CONCEPT/PROMPT:\n{prompt_text}\n\nJSON OUTPUT:"
+                "IMPORTANT: Return ONLY the required JSON array.\n\n"
+                f"KỊCH BẢN:\n{prompt_text}\n\nJSON OUTPUT:"
             )
 
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"Failed to process sample video: {e}")
+            logger.error(f"Failed to process sample video: {e}")
             if temp_dir:
                 shutil.rmtree(temp_dir, ignore_errors=True)
-            raise HTTPException(400, f"KhÃ´ng thá»ƒ táº£i video máº«u (cÃ³ thá»ƒ do link sai, video riÃªng tÆ°, hoáº·c ná»n táº£ng cháº·n táº£i). Chi tiáº¿t lá»—i: {e}")
+            raise HTTPException(400, f"Không thể tải video mẫu: {e}")
 
     try:
         raw_result = await provider.run(full_prompt, attachments=attachments, timeout=120.0)
-        # Parse JSON
         clean_json = raw_result.strip()
-        if clean_json.startswith("```json"):
-            clean_json = clean_json[7:]
-        if clean_json.endswith("```"):
-            clean_json = clean_json[:-3]
+        
+        # Extract json block if inside markdown
+        if "```json" in clean_json:
+            clean_json = clean_json.split("```json")[1].split("```")[0]
+        elif "```" in clean_json:
+            clean_json = clean_json.split("```")[1].split("```")[0]
+            
+        # Try to find array brackets to strip surrounding text
+        start_idx = clean_json.find("[")
+        end_idx = clean_json.rfind("]")
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            clean_json = clean_json[start_idx:end_idx+1]
+            
+        import re
+        # Strip trailing commas
+        clean_json = re.sub(r",\s*([\]}])", r"\1", clean_json)
+        
+        # Simple fix for unescaped quotes inside strings (common LLM failure)
+        # This is a bit risky but helps. Better rely on the LLM prompt constraint.
         clean_json = clean_json.strip()
 
         scenes = json.loads(clean_json)
@@ -646,20 +695,15 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
             if temp_dir:
                 shutil.rmtree(temp_dir, ignore_errors=True)
             raise exc
-        logger.error(f"LLM story generation failed: {exc}")
+        logger.error(f"LLM story generation failed: {exc}\nRaw result: {raw_result}")
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
-        raise HTTPException(400, f"Lá»—i tá»« AI (Gemini): {str(exc)}")
+        raise HTTPException(400, f"Lỗi từ AI: {str(exc)}. Vui lòng tạo lại.")
 
+    # Upload sample reference frames if available
     sample_reference = None
-    # Per-scene timeline-aligned frames: scene_frame_refs[i] holds the uploaded
-    # source frame nearest scene i's position in the video (or None). When
-    # present, each scene's clip starts from the REAL source frame so the
-    # result tracks the original's composition/progression, and the
-    # auto face-swap (if a Character is connected) replaces the face.
     scene_frame_refs: list[Optional[dict]] = []
     if sample_frame_candidates:
-        # Hero frame (best visible face) â€” kept as a global identity/style ref.
         scored = [f for f in sample_frame_candidates if f.get("face_score", 0) > 0]
         if scored:
             chosen_frame = max(scored, key=lambda f: f.get("face_score", 0))
@@ -673,14 +717,6 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
             height=chosen_frame["height"],
         )
 
-        # Map one source frame to each scene by normalized timeline position.
-        # Scene i sits at (i + 0.5) / N of the way through the video; pick the
-        # extracted frame whose `frac` is closest. Upload each once; reuse the
-        # hero upload when a scene maps to the same frame to save round-trips.
-        # IMPORTANT: every scene must end up with a REAL sample frame so it
-        # tracks the source. If a scene's nearest frame fails to upload, we fall
-        # back to the closest frame that DID upload (and finally the hero), so a
-        # scene is never left frameless just because one upload errored.
         n_scenes = max(len(scenes), 1)
         uploaded_by_path: dict[str, Optional[dict]] = {}
         if sample_reference is not None:
@@ -688,11 +724,7 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
         ordered = sorted(sample_frame_candidates, key=lambda f: f.get("frac", 0.0))
         for i in range(len(scenes)):
             target = (i + 0.5) / n_scenes
-            # Try candidates in order of distance from the scene's timeline
-            # position; take the first one that uploads successfully.
-            by_distance = sorted(
-                ordered, key=lambda f: abs(f.get("frac", 0.0) - target)
-            )
+            by_distance = sorted(ordered, key=lambda f: abs(f.get("frac", 0.0) - target))
             scene_ref: Optional[dict] = None
             for cand in by_distance:
                 path = cand["path"]
@@ -707,7 +739,6 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                 if uploaded_by_path[path] is not None:
                     scene_ref = uploaded_by_path[path]
                     break
-            # Last resort: the hero/global reference if it uploaded.
             if scene_ref is None:
                 scene_ref = sample_reference
             scene_frame_refs.append(scene_ref)
@@ -715,14 +746,121 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
     if temp_dir:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-    # Now spawn nodes in DB
-    spawned_nodes = []
+    # Build editable shots array
+    shots = []
+    for i, scene in enumerate(scenes):
+        shot = {
+            "id": f"shot_{i:03d}",
+            "index": i,
+            "title": scene.get("title", f"Phân cảnh {i+1}"),
+            "narration": scene.get("narration", ""),
+            "image_prompt": _scene_text(scene, "image_prompt"),
+            "video_prompt": _scene_text(scene, "video_prompt"),
+            "camera": scene.get("camera", ""),
+            "duration": shot_duration,
+        }
+        # Attach sample frame reference if available
+        if i < len(scene_frame_refs) and scene_frame_refs[i]:
+            shot["sampleFrameRef"] = scene_frame_refs[i]
+        shots.append(shot)
 
+    # Save shots + config to node.data (Phase 1 — editable, no nodes spawned yet)
     with get_session() as s:
-        # Re-fetch node inside transaction
         node = s.get(Node, node_id)
         if not node:
             raise HTTPException(404, "Node not found")
+        updated_data = dict(node.data or {})
+        updated_data["prompt"] = prompt_text
+        updated_data["shots"] = shots
+        updated_data["style"] = style
+        updated_data["shotDuration"] = shot_duration
+        updated_data["aspectRatio"] = aspect_ratio
+        updated_data["sceneCount"] = scene_count
+        if sample_reference:
+            updated_data["sampleVideoReferenceMediaId"] = sample_reference["media_id"]
+        node.data = updated_data
+        node.status = "shots_ready"
+        s.add(node)
+        s.commit()
+
+    return {
+        "ok": True,
+        "shots": shots,
+        "scenes_count": len(shots),
+    }
+
+
+@router.post("/story-script/{node_id}/update-shots")
+async def update_story_shots(node_id: int, body: UpdateShotsRequest):
+    """Phase 2: Save user-edited shots back to node.data.shots."""
+    with get_session() as s:
+        node = s.get(Node, node_id)
+        if not node:
+            raise HTTPException(404, "Node not found")
+        if node.type != "story_script":
+            raise HTTPException(400, "Node must be of type 'story_script'")
+
+        # Validate shots
+        validated = []
+        for i, shot in enumerate(body.shots):
+            validated.append({
+                "id": shot.get("id", f"shot_{i:03d}"),
+                "index": i,
+                "title": shot.get("title", f"Phân cảnh {i+1}"),
+                "narration": shot.get("narration", ""),
+                "image_prompt": shot.get("image_prompt", ""),
+                "video_prompt": shot.get("video_prompt", ""),
+                "camera": shot.get("camera", ""),
+                "duration": shot.get("duration", 8),
+                "sampleFrameRef": shot.get("sampleFrameRef"),
+            })
+
+        updated_data = dict(node.data or {})
+        updated_data["shots"] = validated
+        node.data = updated_data
+        s.add(node)
+        s.commit()
+
+    return {"ok": True, "shots": validated}
+
+
+@router.post("/story-script/{node_id}/create-video")
+async def create_video_from_shots(node_id: int, body: CreateVideoRequest):
+    """Phase 3: Spawn image + video nodes from finalized shots.
+
+    Reads node.data.shots (edited by user), then spawns the same node
+    graph that the old generate_story_script used to create in one step.
+    Also connects upstream reference nodes and video_assembly.
+    """
+    spawned_nodes = []
+
+    with get_session() as s:
+        node = s.get(Node, node_id)
+        if not node:
+            raise HTTPException(404, "Node not found")
+        if node.type != "story_script":
+            raise HTTPException(400, "Node must be of type 'story_script'")
+
+        node_data = node.data or {}
+        shots = node_data.get("shots", [])
+        if not shots:
+            raise HTTPException(400, "No shots found. Generate shots first.")
+
+        board_id = node.board_id
+        aspect_ratio = node_data.get("aspectRatio", "portrait")
+        sample_video_url = node_data.get("sampleVideoUrl", "")
+
+        # Map aspect ratio
+        img_aspect = {
+            "portrait": "IMAGE_ASPECT_RATIO_PORTRAIT",
+            "landscape": "IMAGE_ASPECT_RATIO_LANDSCAPE",
+            "square": "IMAGE_ASPECT_RATIO_SQUARE",
+        }.get(aspect_ratio, "IMAGE_ASPECT_RATIO_PORTRAIT")
+        vid_aspect = {
+            "portrait": "VIDEO_ASPECT_RATIO_PORTRAIT",
+            "landscape": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+            "square": "VIDEO_ASPECT_RATIO_SQUARE",
+        }.get(aspect_ratio, "VIDEO_ASPECT_RATIO_PORTRAIT")
 
         # Update story_script node status to running
         node.status = "running"
@@ -731,10 +869,9 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
 
     try:
         with get_session() as s:
-            # Re-fetch node inside transaction
             node = s.get(Node, node_id)
 
-            # 1. Find connected video_assembly node (downstream of this story_script node)
+            # Find connected video_assembly node
             edges = s.exec(select(Edge).where(Edge.source_id == node_id)).all()
             assembly_node_id = None
             for e in edges:
@@ -743,7 +880,6 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                     assembly_node_id = target_node.id
                     break
 
-            # If no assembly node connected, let's look for any assembly node on the same board
             if not assembly_node_id:
                 assembly_node = s.exec(
                     select(Node).where(Node.board_id == board_id, Node.type == "video_assembly")
@@ -751,7 +887,7 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                 if assembly_node:
                     assembly_node_id = assembly_node.id
 
-            # Find all reference nodes connected upstream to the story_script node
+            # Find upstream reference nodes
             incoming_script_edges = s.exec(
                 select(Edge).where(Edge.target_id == node_id)
             ).all()
@@ -765,7 +901,6 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                     if sn.id not in upstream_refs:
                         upstream_refs.append(sn.id)
 
-            # Also search upstream of the video_assembly node if connected
             if assembly_node_id:
                 incoming_assembly_edges = s.exec(
                     select(Edge).where(Edge.target_id == assembly_node_id)
@@ -776,7 +911,7 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                         if sn.id not in upstream_refs:
                             upstream_refs.append(sn.id)
 
-            # Fallback 1: if no style preset is in refs, query all style presets on this board
+            # Fallback: style_preset on board
             has_style = any(s.get(Node, rid).type == "style_preset" for rid in upstream_refs if s.get(Node, rid))
             if not has_style:
                 board_presets = s.exec(
@@ -786,7 +921,7 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                     if bp.id not in upstream_refs:
                         upstream_refs.append(bp.id)
 
-            # Fallback 2: if no character is in refs, query all characters on this board
+            # Fallback: character on board
             has_char = any(s.get(Node, rid).type == "character" for rid in upstream_refs if s.get(Node, rid))
             if not has_char:
                 board_characters = s.exec(
@@ -805,12 +940,6 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
 
             has_character_ref = any(_node_type(ref_id) == "character" for ref_id in upstream_refs)
 
-            if sample_reference:
-                # Keep the uploaded hero sample reference only as story metadata.
-                # Do not spawn a global visual_asset node on the canvas; per-scene
-                # sample-frame refs below are the only sample refs used for images.
-                pass
-
             character_ref_ids = [
                 ref_id for ref_id in upstream_refs if _node_type(ref_id) == "character"
             ]
@@ -819,46 +948,28 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                 identity_prefix = (
                     "Use the connected Character reference as the authoritative identity source. "
                     "REFERENCE PRIORITY: Character reference is face/identity ONLY. "
-                    "Sample video reference is the authoritative background/scene/composition source. "
                     "Preserve the exact same Character face, facial features, hairstyle, age, "
-                    "skin tone, and overall person. Use the sample video for location, background, "
-                    "props, lighting, camera angle, framing, outfit/body pose, choreography, and "
-                    "scene style. Replace only the sample dancer's face/identity with the Character; "
-                    "never copy the sample dancer's face, and never change the sample background into "
-                    "a different location unless the user's prompt explicitly requests it. Keep the "
-                    "Character face visible, recognizable, front-readable, and not hidden by silhouette, "
-                    "heavy backlight, blur, mask, hair, hands, or extreme distance. "
+                    "skin tone, and overall person. "
                 )
-            elif sample_reference:
+            elif sample_video_url:
                 identity_prefix = (
                     "Use the connected sample video reference as the authoritative "
                     "identity source: preserve the same face, hairstyle, outfit, body "
-                    "proportions, dance-video visual style, and setting. Do not invent "
-                    "a different character. "
+                    "proportions, and setting. "
                 )
-
-            # When the user supplied a sample video, we anchor EACH scene to the
-            # real source frame at that point in the timeline (scene_frame_refs).
-            # Every scene then spawns its own "done" image node holding that
-            # frame, and the scene's clip starts from it â€” so the generated video
-            # tracks the original's composition/progression shot-by-shot, and the
-            # auto face-swap (Character connected) puts your character's face on
-            # top. Without a sample video we keep the classic behaviour: only the
-            # first scene gets an AI-generated base image and clips chain off the
-            # previous clip's last frame.
-            use_source_frames = bool(scene_frame_refs)
 
             prev_vid_node = None
             base_img_node = None
-            for i, scene in enumerate(scenes):
-                image_prompt = _scene_text(scene, "image_prompt")
-                video_prompt = _scene_text(scene, "video_prompt")
 
-                scene_frame = scene_frame_refs[i] if i < len(scene_frame_refs) else None
+            for i, shot in enumerate(shots):
+                image_prompt = shot.get("image_prompt", "")
+                video_prompt = shot.get("video_prompt", "")
+                narration = shot.get("narration", "")
+                camera = shot.get("camera", "")
+                sample_frame_ref = shot.get("sampleFrameRef")
 
-                if use_source_frames and scene_frame:
-                    # Per-scene sample frame reference. This is NOT the final image;
-                    # it feeds the generated scene image together with Character refs.
+                if sample_frame_ref:
+                    # Per-scene sample frame reference node
                     frame_short_id = generate_unique_short_id(s, board_id)
                     frame_ref_node = Node(
                         board_id=board_id,
@@ -867,17 +978,16 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                         x=base_x + 320,
                         y=base_y + i * 240,
                         data={
-                            "title": scene.get("title", f"Scene {i+1} - Sample frame"),
+                            "title": shot.get("title", f"Scene {i+1} - Sample frame"),
                             "prompt": (
                                 "Timeline sample frame reference. Preserve this frame's background, "
-                                "composition, camera angle, lighting, outfit/body pose, and scene style. "
-                                "Use Character refs only for face/identity."
+                                "composition, camera angle, lighting, outfit/body pose, and scene style."
                             ),
                             "aiBrief": "Per-scene sample frame used as background/pose/camera reference.",
-                            "mediaId": scene_frame["media_id"],
-                            "mediaIds": [scene_frame["media_id"]],
+                            "mediaId": sample_frame_ref["media_id"],
+                            "mediaIds": [sample_frame_ref["media_id"]],
                             "variantCount": 1,
-                            "aspectRatio": scene_frame.get("aspect_ratio") or "IMAGE_ASPECT_RATIO_PORTRAIT",
+                            "aspectRatio": sample_frame_ref.get("aspect_ratio") or img_aspect,
                             "sourceVideoFrame": True,
                             "sourceStoryScriptId": node_id,
                             "sequenceIndex": i,
@@ -888,49 +998,9 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                     s.flush()
                     spawned_nodes.append(frame_ref_node)
 
-                    # FRAME FIDELITY: the source frame is passed as a reference
-                    # image, but without this the model crops into a tight,
-                    # smiling upper-body portrait and drops the rest of the body.
-                    # Force it to reproduce the reference frame's exact shot:
-                    # same camera distance / crop, full-body framing when the
-                    # source is full-body (keep legs / lower body / full outfit
-                    # in frame), same body pose and hand/arm position, and the
-                    # same facial expression. Do NOT zoom in, do NOT add a smile.
-                    frame_fidelity_prefix = (
-                        "KEEP EVERYTHING FROM THE SAMPLE FRAME — CHANGE ONLY THE FACE. "
-                        "The sample reference frame is the SINGLE SOURCE OF TRUTH for the "
-                        "whole picture. Reproduce it as faithfully as a photo of the same "
-                        "moment; the ONLY thing allowed to change is the person's facial "
-                        "identity (swapped to the connected Character). Preserve from the "
-                        "frame, unchanged:\n"
-                        "• CLOTHING / OUTFIT: the EXACT same garments, same cut, same fit, "
-                        "same length, same colors and patterns, same straps/sleeves/neckline "
-                        "and amount of skin shown (e.g. crop top, off-shoulder top, denim "
-                        "shorts, fitted dress). Do NOT redesign, recolor, cover up, lengthen, "
-                        "add layers, or swap the outfit for anything more modest or different. "
-                        "Do NOT take clothing from the Character reference image.\n"
-                        "• BODY: the same body type, build, height, skin tone, curves, waist, "
-                        "hips, bust and leg proportions — if the frame is slim and sexy keep it "
-                        "slim and sexy; do not slim down, bulk up, or reshape the body. Do NOT "
-                        "take the body or proportions from the Character reference image.\n"
-                        "• SCENE / BACKGROUND: the same location, background, props, depth and "
-                        "perspective. Do NOT change the setting.\n"
-                        "• LIGHTING / COLOR: the same light direction, intensity, mood, white "
-                        "balance and color grade as the frame.\n"
-                        "• FRAMING / CAMERA: the same shot size, camera distance, angle and "
-                        "crop — if the frame is full-body / knees-up, keep it full-body with "
-                        "the legs and lower body in frame; do NOT zoom into a tight upper-body "
-                        "or face portrait.\n"
-                        "• POSE / EXPRESSION: the same body pose, stance, hand and arm "
-                        "position, body angle and the same facial expression; do NOT add a "
-                        "smile, open the mouth, or change the pose.\n"
-                        "The Character reference is used ONLY for the face / facial identity — "
-                        "nothing else. Same outfit, same body, same scene, same light, same "
-                        "framing, same pose as the sample frame. "
-                    )
-                    scene_image_prompt = f"{frame_fidelity_prefix}{image_prompt}"
-                    if identity_prefix and identity_prefix not in scene_image_prompt:
-                        scene_image_prompt = f"{identity_prefix}{scene_image_prompt}"
+                    scene_image_prompt = f"{identity_prefix}{image_prompt}" if identity_prefix else image_prompt
+                    if camera:
+                        scene_image_prompt += f" {camera}"
                     img_short_id = generate_unique_short_id(s, board_id)
                     img_node = Node(
                         board_id=board_id,
@@ -939,10 +1009,10 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                         x=base_x + 640,
                         y=base_y + i * 240,
                         data={
-                            "title": scene.get("title", f"Scene {i+1} - Image"),
+                            "title": shot.get("title", f"Scene {i+1} - Image"),
                             "prompt": scene_image_prompt,
-                            "aspectRatio": scene_frame.get("aspect_ratio") or "IMAGE_ASPECT_RATIO_PORTRAIT",
-                            "sourceVideoFrameMediaId": scene_frame["media_id"],
+                            "aspectRatio": sample_frame_ref.get("aspect_ratio") or img_aspect,
+                            "sourceVideoFrameMediaId": sample_frame_ref["media_id"],
                             "sequenceIndex": i,
                         },
                         status="idle",
@@ -961,22 +1031,49 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                         base_img_node = img_node
 
                     asset = s.exec(
-                        select(Asset).where(Asset.uuid_media_id == scene_frame["media_id"])
+                        select(Asset).where(Asset.uuid_media_id == sample_frame_ref["media_id"])
                     ).first()
                     if asset and asset.node_id is None:
                         asset.node_id = frame_ref_node.id
                         s.add(asset)
-                elif use_source_frames:
-                    # Sample-video mode, but THIS scene has no usable frame
-                    # (upload failed / fewer frames than scenes). Still give the
-                    # scene its OWN AI-generated image anchor so we keep a strict
-                    # 1 image : 1 video alignment — otherwise the video below was
-                    # spawned with no image of its own and got wired onto a
-                    # shared base image, which is what made videos outnumber
-                    # images/samples and wired them messily.
+                elif i == 0:
+                    # First scene: AI-generated base image
+                    first_image_prompt = image_prompt
+                    if identity_prefix and identity_prefix not in first_image_prompt:
+                        first_image_prompt = f"{identity_prefix}{first_image_prompt}"
+                    if camera:
+                        first_image_prompt += f" {camera}"
+                    img_short_id = generate_unique_short_id(s, board_id)
+                    img_node = Node(
+                        board_id=board_id,
+                        short_id=img_short_id,
+                        type="image",
+                        x=base_x + 320,
+                        y=base_y - 100,
+                        data={
+                            "title": shot.get("title", f"Cảnh {i+1} - Ảnh"),
+                            "prompt": first_image_prompt,
+                            "aspectRatio": img_aspect,
+                        },
+                        status="idle",
+                    )
+                    s.add(img_node)
+                    s.flush()
+
+                    for ref_id in upstream_refs:
+                        s.add(Edge(board_id=board_id, source_id=ref_id,
+                                   target_id=img_node.id, kind="ref"))
+
+                    spawned_nodes.append(img_node)
+                    base_img_node = img_node
+                    scene_start_node = img_node
+                else:
+                    # Non-first scene without sample frame: generate its own image
                     per_scene_prompt = image_prompt
                     if identity_prefix and identity_prefix not in per_scene_prompt:
                         per_scene_prompt = f"{identity_prefix}{per_scene_prompt}"
+                    if camera:
+                        per_scene_prompt += f" {camera}"
                     img_short_id = generate_unique_short_id(s, board_id)
                     img_node = Node(
                         board_id=board_id,
@@ -985,9 +1082,9 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                         x=base_x + 640,
                         y=base_y + i * 240,
                         data={
-                            "title": scene.get("title", f"Scene {i+1} - Image"),
+                            "title": shot.get("title", f"Scene {i+1} - Image"),
                             "prompt": per_scene_prompt,
-                            "aspectRatio": "IMAGE_ASPECT_RATIO_PORTRAIT",
+                            "aspectRatio": img_aspect,
                             "sequenceIndex": i,
                         },
                         status="idle",
@@ -1001,51 +1098,11 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                     scene_start_node = img_node
                     if base_img_node is None:
                         base_img_node = img_node
-                elif i == 0:
-                    # Classic path: AI-generated base image for the first scene.
-                    first_image_prompt = image_prompt
-                    if identity_prefix and identity_prefix not in first_image_prompt:
-                        first_image_prompt = f"{identity_prefix}{first_image_prompt}"
-                    img_short_id = generate_unique_short_id(s, board_id)
-                    img_node = Node(
-                        board_id=board_id,
-                        short_id=img_short_id,
-                        type="image",
-                        x=base_x + 320,
-                        y=base_y - 100,
-                        data={
-                            "title": scene.get("title", f"Cáº£nh {i+1} - áº¢nh"),
-                            "prompt": first_image_prompt,
-                            # Portrait by default to match the Video Assembly
-                            # batch default (9:16 TikTok/Reels). Mismatched
-                            # defaults made the batch flag every story image as
-                            # aspect_mismatch and regenerate it needlessly.
-                            "aspectRatio": "IMAGE_ASPECT_RATIO_PORTRAIT"
-                        },
-                        status="idle"
-                    )
-                    s.add(img_node)
-                    s.flush()
 
-                    # Auto-connect all upstream reference nodes to the newly spawned image node
-                    for ref_id in upstream_refs:
-                        edge_ref = Edge(
-                            board_id=board_id,
-                            source_id=ref_id,
-                            target_id=img_node.id,
-                            kind="ref"
-                        )
-                        s.add(edge_ref)
-
-                    spawned_nodes.append(img_node)
-                    base_img_node = img_node
-                    scene_start_node = img_node
-                else:
-                    scene_start_node = None
-
+                # Build video prompt with continuity
                 combined_prompt = _build_continuity_video_prompt(
                     scene_index=i,
-                    total_scenes=len(scenes),
+                    total_scenes=len(shots),
                     image_prompt=image_prompt,
                     video_prompt=video_prompt,
                     identity_prefix=identity_prefix,
@@ -1061,73 +1118,52 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                     x=base_x + 960,
                     y=base_y + i * 240,
                     data={
-                        "title": scene.get("title", f"Scene {i+1} - Clip"),
+                        "title": shot.get("title", f"Scene {i+1} - Clip"),
                         "prompt": combined_prompt,
-                        "narration": scene.get("narration", ""),
-                        "aspectRatio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+                        "narration": narration,
+                        "aspectRatio": vid_aspect,
                         "sourceImagePrompt": image_prompt,
                         "sourceVideoPrompt": video_prompt,
+                        "camera": camera,
                         "sequenceIndex": i,
-                        "sequenceTotal": len(scenes),
+                        "sequenceTotal": len(shots),
                         "continuityMode": "chain",
                         "requiresPreviousClip": i > 0,
                         "fallbackStartImage": i > 0,
+                        "shotDuration": shot.get("duration", 8),
                     },
-                    status="idle"
+                    status="idle",
                 )
                 s.add(vid_node)
                 s.flush()
 
-                # Each clip is anchored by its own generated scene image.
-                # Sample-frame refs feed that image; videos never consume raw sample refs directly.
                 video_start_node = scene_start_node or base_img_node
                 if video_start_node is None:
                     raise HTTPException(400, "No generated image source available for video clip.")
-                base_image_edge = Edge(
-                    board_id=board_id,
-                    source_id=video_start_node.id,
-                    target_id=vid_node.id,
-                    kind="ref",
-                )
-                s.add(base_image_edge)
+                s.add(Edge(board_id=board_id, source_id=video_start_node.id,
+                           target_id=vid_node.id, kind="ref"))
 
                 if prev_vid_node is not None:
-                    chain_edge = Edge(
-                        board_id=board_id,
-                        source_id=prev_vid_node.id,
-                        target_id=vid_node.id,
-                        kind="ref",
-                    )
-                    s.add(chain_edge)
+                    s.add(Edge(board_id=board_id, source_id=prev_vid_node.id,
+                               target_id=vid_node.id, kind="ref"))
 
                 prev_vid_node = vid_node
-
                 spawned_nodes.append(vid_node)
 
                 # Connect video to assembly
                 if assembly_node_id:
-                    edge2 = Edge(
-                        board_id=board_id,
-                        source_id=vid_node.id,
+                    s.add(Edge(board_id=board_id, source_id=vid_node.id,
+                               target_id=assembly_node_id, kind="ref"))
 
-                        target_id=assembly_node_id,
-                        kind="ref"
-                    )
-                    s.add(edge2)
-
-            # Update story_script node status to done and save prompt
+            # Update story_script node status to done
             node.status = "done"
-            node_data = {**dict(node.data), "prompt": prompt_text}
-            if sample_reference:
-                node_data["sampleVideoReferenceMediaId"] = sample_reference["media_id"]
-            node.data = node_data
             s.add(node)
             s.commit()
 
             return {
                 "ok": True,
-                "scenes_count": len(scenes),
-                "spawned_nodes": [n.id for n in spawned_nodes]
+                "scenes_count": len(shots),
+                "spawned_nodes": [n.id for n in spawned_nodes],
             }
     except Exception as e:
         with get_session() as s:
@@ -1136,8 +1172,5 @@ async def generate_story_script(node_id: int, body: GenerateStoryRequest):
                 node.status = "error"
                 s.add(node)
                 s.commit()
-        if isinstance(e, HTTPException):
-            raise e
         raise HTTPException(500, f"Error spawning storyboard nodes: {str(e)}")
-
 

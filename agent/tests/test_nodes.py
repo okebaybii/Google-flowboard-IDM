@@ -378,6 +378,13 @@ def test_story_script_sample_video_creates_reference_asset(client, monkeypatch):
     )
     assert res.status_code == 200, res.text
 
+    # Call Phase 3 to spawn nodes
+    res2 = client.post(
+        f"/api/nodes/story-script/{story['id']}/create-video",
+        json={"projectId": "abcd1234"}
+    )
+    assert res2.status_code == 200, res2.text
+
     detail = client.get(f"/api/boards/{b['id']}").json()
     sample_refs = [
         n
@@ -506,12 +513,19 @@ def test_story_script_character_reference_locks_identity_without_sample_video(cl
     )
     assert res.status_code == 200, res.text
 
+    # Call Phase 3 to spawn nodes
+    res2 = client.post(
+        f"/api/nodes/story-script/{story['id']}/create-video",
+        json={}
+    )
+    assert res2.status_code == 200, res2.text
+
     detail = client.get(f"/api/boards/{b['id']}").json()
     image_node = next(n for n in detail["nodes"] if n["type"] == "image")
     video_node = next(n for n in detail["nodes"] if n["type"] == "video")
 
     assert "connected Character reference as the authoritative identity source" in image_node["data"]["prompt"]
-    assert "not hidden by silhouette" in image_node["data"]["prompt"]
+    assert "overall person" in image_node["data"]["prompt"]
     assert "connected Character reference as the authoritative identity source" in video_node["data"]["prompt"]
     assert any(
         e["source_id"] == character["id"] and e["target_id"] == image_node["id"]

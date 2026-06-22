@@ -67,11 +67,23 @@ def resolve_omni_flash_model(duration_s: int) -> str:
     return key
 
 
-def _media_get_url(media_id: str) -> str:
+def _media_get_url(
+    media_id: str,
+    project_id: Optional[str] = None,
+    paygate_tier: Optional[str] = None,
+) -> str:
     """Endpoint that returns inline encoded video bytes for a workflow's
     primary media. Used to poll Low Priority (workflow-schema) submissions —
     they have no operation name and don't appear in ``batchCheckAsync``."""
-    return f"{FLOW_API_BASE}/v1/media/{media_id}?clientContext.tool=PINHOLE"
+    url = f"{FLOW_API_BASE}/v1/media/{media_id}?clientContext.tool=PINHOLE"
+    if project_id:
+        url += f"&clientContext.projectId={project_id}"
+    if paygate_tier:
+        mapped_tier = paygate_tier
+        if mapped_tier == "PAYGATE_TIER_NOT_PAID":
+            mapped_tier = "PAYGATE_TIER_ONE"
+        url += f"&clientContext.userPaygateTier={mapped_tier}"
+    return url
 
 # Image model keys, indexed by the user-facing nickname used in
 # flowkit's models.json. Pro is Flow's premium / higher-quality image
@@ -553,6 +565,8 @@ class FlowSDK:
         # pairing so the poller can hit `/v1/media/<id>` directly.
         workflows = extract_video_workflows(resp)
         if workflows:
+            for wf in workflows:
+                wf["paygate_tier"] = paygate_tier
             out["workflows"] = workflows
         return out
 
@@ -642,6 +656,8 @@ class FlowSDK:
         out: dict[str, Any] = {"raw": resp, "operation_names": op_names}
         workflows = extract_video_workflows(resp)
         if workflows:
+            for wf in workflows:
+                wf["paygate_tier"] = paygate_tier
             out["workflows"] = workflows
         return out
 
@@ -707,6 +723,8 @@ class FlowSDK:
         out: dict[str, Any] = {"raw": resp, "operation_names": op_names}
         workflows = extract_video_workflows(resp)
         if workflows:
+            for wf in workflows:
+                wf["paygate_tier"] = paygate_tier
             out["workflows"] = workflows
         return out
 
@@ -769,7 +787,8 @@ class FlowSDK:
         return {"raw": raw_out or raw_old, "operations": ops_summary}
 
     async def _poll_workflows(
-        self, workflows: list[dict[str, Any]]
+        self,
+        workflows: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Single poll pass for workflow-mode (Low Priority) submissions.
 
@@ -792,11 +811,15 @@ class FlowSDK:
                 continue
             name = wf.get("name")
             mid = wf.get("primary_media_id")
+            proj_id = wf.get("project_id")
+            paygate_tier = wf.get("paygate_tier")
             if not isinstance(name, str) or not isinstance(mid, str) or not mid:
                 continue
             try:
                 resp = await self._client.api_request(
-                    url=_media_get_url(mid),
+                    url=_media_get_url(
+                        mid, project_id=proj_id, paygate_tier=paygate_tier
+                    ),
                     method="GET",
                     headers=dict(_API_HEADERS),
                     body=None,
@@ -826,6 +849,12 @@ class FlowSDK:
             if isinstance(status_code, int) and status_code >= 400 and status_code not in (404, 500, 502, 503, 504):
                 # Surface the inner Flow error (e.g. content filter).
                 inner = _extract_inner_api_error(resp)
+                if status_code == 400 and inner == "Request contains an invalid argument.":
+                    # Temporary 400 during early stages of video rendering
+                    ops_summary.append(
+                        {"name": name, "done": False, "media_entries": [], "status": None, "error": None}
+                    )
+                    continue
                 ops_summary.append(
                     {
                         "name": name,
@@ -1176,7 +1205,7 @@ def extract_operation_names(resp: Any) -> list[str]:
 def extract_video_workflows(resp: Any) -> list[dict[str, Any]]:
     """Pull workflow entries out of a NEW-schema video submit response.
 
-    Returns ``[{"name": <workflow_name>, "primary_media_id": <uuid>}, ...]``.
+    Returns ``[{"name": <workflow_name>, "primary_media_id": <uuid>, "project_id": <id>}, ...]``.
     Empty list when the response is OLD-schema (operations-based) or has no
     workflows. Callers use this to drive media-endpoint polling — workflow
     submits don't yield operations, so ``batchCheckAsync`` can't see them;
@@ -1198,8 +1227,13 @@ def extract_video_workflows(resp: Any) -> list[dict[str, Any]]:
         name = wf.get("name")
         meta = wf.get("metadata") if isinstance(wf.get("metadata"), dict) else {}
         primary = meta.get("primaryMediaId") if isinstance(meta, dict) else None
+        proj_id = wf.get("projectId")
         if isinstance(name, str) and name and isinstance(primary, str) and primary:
-            out.append({"name": name, "primary_media_id": primary})
+            out.append({
+                "name": name,
+                "primary_media_id": primary,
+                "project_id": proj_id,
+            })
     return out
 
 

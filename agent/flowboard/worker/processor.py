@@ -710,6 +710,45 @@ def _trigger_downstream_videos(source_node_id: int, start_media_id: str) -> None
 # like Veo's start_media_ids), so the polling logic collapses to a single
 # op + first-error-wins, simpler than _handle_gen_video.
 
+async def _apply_narration_to_video(video_bytes: bytes, narration: str, duration_s: int) -> bytes:
+    import tempfile
+    import os
+    from flowboard.services.tts import generate_speech
+    
+    with tempfile.TemporaryDirectory() as td:
+        video_path = os.path.join(td, "video.mp4")
+        audio_path = os.path.join(td, "audio.wav")
+        out_path = os.path.join(td, "out.mp4")
+        
+        with open(video_path, "wb") as f:
+            f.write(video_bytes)
+            
+        await generate_speech(narration, audio_path)
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-i", audio_path,
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-shortest",
+            out_path
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.error("ffmpeg failed to mux narration: %s", stderr.decode())
+            return video_bytes
+            
+        with open(out_path, "rb") as f:
+            return f.read()
+
+
 async def _handle_gen_video_omni(params: dict) -> tuple[dict, Optional[str]]:
     from flowboard.services.flow_sdk import is_valid_project_id
     from flowboard.services.media_project_sync import (
@@ -879,6 +918,8 @@ async def _handle_gen_video_omni(params: dict) -> tuple[dict, Optional[str]]:
     # Omni Flash uses workflow-mode polling: Flow delivers the rendered MP4
     # inline as base64 on `/v1/media/<id>` with no signed GCS URL. Plant the
     # bytes in the local cache so `/media/<id>` can serve them.
+    narration = params.get("narration")
+
     for entry in succeeded_entries:
         if not isinstance(entry, dict):
             continue
@@ -888,8 +929,16 @@ async def _handle_gen_video_omni(params: dict) -> tuple[dict, Optional[str]]:
             continue
         try:
             import base64 as _b64
+            video_bytes = _b64.b64decode(encoded, validate=False)
+            
+            if narration and isinstance(narration, str) and narration.strip():
+                try:
+                    video_bytes = await _apply_narration_to_video(video_bytes, narration.strip(), duration_s)
+                except Exception as e:
+                    logger.exception("Failed to apply narration to video %s: %s", mid, e)
+
             media_service.ingest_inline_bytes(
-                mid, _b64.b64decode(encoded, validate=False),
+                mid, video_bytes,
                 kind="video", mime="video/mp4",
             )
         except Exception:  # noqa: BLE001
